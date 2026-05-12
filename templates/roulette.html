@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% from "macros.html" import fair_box %}
+
+{% block title %}Roulette - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="game-page roulette-stage">
+    <div class="game-board">
+        <div class="table-header">
+            <div>
+                <div class="section-kicker">European Roulette</div>
+                <h1>Single zero wheel</h1>
+            </div>
+            <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
+        </div>
+
+        <div class="roulette-visual {{ result.color if result else '' }}">
+            <div class="roulette-wheel {{ 'has-result' if result else '' }}" style="--result-angle: {{ result_angle }}deg">
+                <div class="roulette-slots">
+                    {% for slot in roulette_slots %}
+                        <span
+                            class="roulette-slot {{ slot.color }} {{ 'hit' if slot.is_result else '' }}"
+                            style="--angle: {{ slot.angle }}deg; --counter-angle: {{ slot.counter_angle }}deg"
+                        >{{ slot.number }}</span>
+                    {% endfor %}
+                </div>
+                <div class="roulette-ball"></div>
+                <strong>{{ result.number if result else '?' }}</strong>
+            </div>
+            <div class="roulette-number-board">
+                {% for slot in roulette_slots|sort(attribute='number') %}
+                    <span class="{{ slot.color }} {{ 'hit' if slot.is_result else '' }}">{{ slot.number }}</span>
+                {% endfor %}
+            </div>
+        </div>
+
+        {% if result %}
+            <div class="result-banner {{ 'win' if result.win else 'lose' }}">
+                <strong>{{ result.color.title() }} {{ result.number }}</strong>
+                <span>{{ '%+d'|format(result.net) }} chips</span>
+            </div>
+            {{ fair_box(result.fair) }}
+        {% endif %}
+    </div>
+
+    <aside class="bet-panel">
+        <form method="post" class="stacked-form" data-roulette-form>
+            <label>
+                Bet
+                <input type="number" name="bet" min="1" value="{{ result.bet if result else 100 }}" required>
+            </label>
+            <label>
+                Client seed
+                <input name="client_seed" value="{{ current_user.username }}-roulette">
+            </label>
+            <input type="hidden" name="bet_type" value="{{ result.bet_type if result else 'red' }}">
+            <input type="hidden" name="number" value="{{ result.chosen_number if result and result.chosen_number is not none else 7 }}">
+            <div class="roulette-bet-board" data-roulette-board>
+                <button class="roulette-zero green" type="button" data-bet-type="number" data-number="0">0</button>
+                <div class="roulette-number-grid">
+                    {% for number in range(1, 37) %}
+                        <button
+                            class="{{ 'red' if number in [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36] else 'black' }}"
+                            type="button"
+                            data-bet-type="number"
+                            data-number="{{ number }}"
+                        >{{ number }}</button>
+                    {% endfor %}
+                </div>
+                <div class="roulette-outside-grid">
+                    <button type="button" data-bet-type="dozen1">1st 12</button>
+                    <button type="button" data-bet-type="dozen2">2nd 12</button>
+                    <button type="button" data-bet-type="dozen3">3rd 12</button>
+                    <button type="button" data-bet-type="low">1-18</button>
+                    <button type="button" data-bet-type="even">Even</button>
+                    <button class="red" type="button" data-bet-type="red">Red</button>
+                    <button class="black" type="button" data-bet-type="black">Black</button>
+                    <button type="button" data-bet-type="odd">Odd</button>
+                    <button type="button" data-bet-type="high">19-36</button>
+                    <button type="button" data-bet-type="column1">Column 1</button>
+                    <button type="button" data-bet-type="column2">Column 2</button>
+                    <button type="button" data-bet-type="column3">Column 3</button>
+                </div>
+            </div>
+            <button class="button primary" type="submit">Spin</button>
+        </form>
+    </aside>
+</section>
+{% endblock %}

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% from "macros.html" import playing_card, fair_box %}
+
+{% block title %}Dragon Tiger - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="game-page dragon-stage">
+    <div class="game-board">
+        <div class="table-header">
+            <div>
+                <div class="section-kicker">Dragon Tiger</div>
+                <h1>Single card duel</h1>
+            </div>
+            <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
+        </div>
+
+        {% if result %}
+            <div class="result-banner result-reveal-pending {{ 'win' if result.net > 0 else ('push' if result.net == 0 else 'lose') }}">
+                <strong>{{ result.winner.title() }}</strong>
+                <span>{{ '%+d'|format(result.net) }} chips</span>
+            </div>
+            <div class="duel-cards">
+                <div>
+                    <h2>Dragon</h2>
+                    {{ playing_card(result.dragon, order=0) }}
+                </div>
+                <div class="versus">VS</div>
+                <div>
+                    <h2>Tiger</h2>
+                    {{ playing_card(result.tiger, order=1) }}
+                </div>
+            </div>
+            {{ fair_box(result.fair) }}
+        {% endif %}
+    </div>
+
+    <aside class="bet-panel">
+        <form method="post" class="stacked-form">
+            <label>
+                Bet
+                <input type="number" name="bet" min="1" value="{{ result.bet if result else 100 }}" required>
+            </label>
+            <label>
+                Client seed
+                <input name="client_seed" value="{{ current_user.username }}-dragon">
+            </label>
+            <div class="segmented">
+                <label><input type="radio" name="wager" value="dragon" checked><span>Dragon</span></label>
+                <label><input type="radio" name="wager" value="tiger"><span>Tiger</span></label>
+                <label><input type="radio" name="wager" value="tie"><span>Tie</span></label>
+            </div>
+            <button class="button primary" type="submit">Reveal</button>
+        </form>
+    </aside>
+</section>
+{% endblock %}

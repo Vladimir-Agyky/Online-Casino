@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}Login - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="auth-layout">
+    <div class="auth-panel">
+        <div class="section-kicker">Fake money tables</div>
+        <h1>Sign in</h1>
+        <form method="post" class="stacked-form">
+            <label>
+                Username
+                <input name="username" autocomplete="username" required autofocus>
+            </label>
+            <label>
+                Password
+                <input type="password" name="password" autocomplete="current-password" required>
+            </label>
+            <button class="button primary" type="submit">Enter casino</button>
+        </form>
+        <p class="muted-line">New player? <a href="{{ url_for('register') }}">Create an account</a></p>
+        <p class="muted-line">Admin: <code>admin</code> / <code>admin123</code></p>
+    </div>
+    <div class="showpiece-wheel">
+        <div class="wheel-ring">
+            {% for n in range(12) %}
+                <span style="--i: {{ n }}"></span>
+            {% endfor %}
+        </div>
+        <div class="wheel-center">
+            <strong>NF</strong>
+            <small>Seeded</small>
+        </div>
+    </div>
+</section>
+{% endblock %}

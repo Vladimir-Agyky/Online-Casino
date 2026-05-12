@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+
+{% block title %}Blackjack - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="online-shell" data-game="blackjack">
+    <div class="online-head">
+        <div>
+            <div class="section-kicker">Blackjack</div>
+            <h1>Dealer table</h1>
+        </div>
+        <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
+    </div>
+    <div id="blackjackApp" class="online-table">
+        <div class="loading-dot">Loading table</div>
+    </div>
+</section>
+{% endblock %}

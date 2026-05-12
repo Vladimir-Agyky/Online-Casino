@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Nova Felt Casino{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="felt-glow"></div>
+    <header class="topbar">
+        <a class="brand" href="{{ url_for('lobby') if current_user else url_for('login') }}">
+            <span class="brand-mark">NF</span>
+            <span>Nova Felt</span>
+        </a>
+        <nav class="nav-links">
+            {% if current_user %}
+                <a href="{{ url_for('lobby') }}">Lobby</a>
+                <a href="{{ url_for('fairness') }}">Fair Play</a>
+                {% if current_user.role == 'admin' %}
+                    <a href="{{ url_for('admin') }}">Admin</a>
+                {% endif %}
+            {% endif %}
+        </nav>
+        <div class="account-strip">
+            {% if current_user %}
+                {% if stats_game %}
+                    <button class="button ghost small graph-button" type="button" data-stats-open data-stats-game="{{ stats_game }}" data-stats-label="{{ stats_game_label }}">
+                        Graph
+                    </button>
+                {% endif %}
+                <span class="chip-balance">{{ format_chips(current_user.balance) }}</span>
+                <span class="username">{{ current_user.username }}</span>
+                <a class="button ghost small" href="{{ url_for('logout') }}">Logout</a>
+            {% else %}
+                <a class="button ghost small" href="{{ url_for('login') }}">Login</a>
+            {% endif %}
+        </div>
+    </header>
+
+    <main class="page-shell">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="flash-stack">
+                    {% for category, message in messages %}
+                        <div class="flash {{ category }}">{{ message }}</div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+    </main>
+
+    {% if current_user and stats_game %}
+        <div class="stats-modal" data-stats-modal hidden>
+            <div class="stats-backdrop" data-stats-close></div>
+            <section class="stats-dialog" role="dialog" aria-modal="true" aria-labelledby="stats-title">
+                <div class="stats-dialog-head" data-stats-drag>
+                    <div>
+                        <div class="section-kicker">Performance</div>
+                        <h2 id="stats-title" data-stats-title>{{ stats_game_label }} Graph</h2>
+                    </div>
+                    <button class="button ghost small" type="button" data-stats-close>Close</button>
+                </div>
+                <div class="stats-summary modal-summary">
+                    <div>
+                        <span>Profit</span>
+                        <strong class="profit-value" data-stats-profit>0</strong>
+                    </div>
+                    <div>
+                        <span>Wagered</span>
+                        <strong data-stats-wagered>0</strong>
+                    </div>
+                    <div>
+                        <span>ROI</span>
+                        <strong data-stats-roi>0%</strong>
+                    </div>
+                </div>
+                <div class="profit-chart stats-chart" data-stats-chart>
+                    <div class="stats-chart-plot" data-stats-plot></div>
+                    <div class="stats-tooltip" data-stats-tooltip hidden></div>
+                    <div class="stats-hover-line" data-stats-hover hidden></div>
+                </div>
+                <div class="profit-stats">
+                    <span>Returns <strong data-stats-payouts>0</strong></span>
+                    <span>Rounds <strong data-stats-rounds>0</strong></span>
+                    <span>Wins / Losses <strong data-stats-record>0 / 0</strong></span>
+                </div>
+            </section>
+        </div>
+    {% endif %}
+
+    <script src="{{ url_for('static', filename='casino.js') }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

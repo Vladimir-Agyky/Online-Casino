@@ -1,0 +1,41 @@
+{% macro suit_symbol(suit) -%}
+    {%- if suit == 'S' -%}&spades;{%- elif suit == 'H' -%}&hearts;{%- elif suit == 'D' -%}&diams;{%- else -%}&clubs;{%- endif -%}
+{%- endmacro %}
+
+{% macro playing_card(card, mini=False, order=0) %}
+    {% if card.hidden %}
+        <div class="playing-card draw-card card-back {{ 'mini' if mini else '' }}" style="--draw-index: {{ order }}"><span>?</span></div>
+    {% else %}
+        <div class="playing-card draw-card {{ 'red-card' if card.suit in ['H', 'D'] else 'black-card' }} {{ 'mini' if mini else '' }}" style="--draw-index: {{ order }}">
+            <span class="card-rank">{{ card.rank }}</span>
+            <span class="card-suit">{{ suit_symbol(card.suit) }}</span>
+        </div>
+    {% endif %}
+{% endmacro %}
+
+{% macro fair_box(fair) %}
+    {% if fair %}
+        <div class="fair-box">
+            <div>
+                <span>Round</span>
+                <strong>{{ fair.id }}</strong>
+            </div>
+            <div>
+                <span>Server hash</span>
+                <code>{{ fair.server_seed_hash }}</code>
+            </div>
+            <div>
+                <span>Server seed</span>
+                <code>{{ fair.server_seed }}</code>
+            </div>
+            <div>
+                <span>Client seed</span>
+                <code>{{ fair.client_seed }}</code>
+            </div>
+            <div>
+                <span>Nonce</span>
+                <code>{{ fair.nonce }}</code>
+            </div>
+        </div>
+    {% endif %}
+{% endmacro %}

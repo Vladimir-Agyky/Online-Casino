@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block title %}Fair Play - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="page-heading">
+    <div>
+        <div class="section-kicker">Provably fair log</div>
+        <h1>Seed records</h1>
+    </div>
+</section>
+
+<section class="panel">
+    <div class="fair-method">
+        <div>
+            <span>Commit</span>
+            <code>sha256(server_seed)</code>
+        </div>
+        <div>
+            <span>Random input</span>
+            <code>server_seed : client_seed : nonce : game</code>
+        </div>
+        <div>
+            <span>Reveal</span>
+            <code>server_seed after round</code>
+        </div>
+    </div>
+</section>
+
+<section class="fair-list">
+    {% for round in rounds %}
+        {% set result = round.result_json|json_loads %}
+        <article class="fair-record">
+            <div class="fair-record-top">
+                <strong>{{ round.game.replace('_', ' ').title() }}</strong>
+                <span>{{ round.created_at }}</span>
+            </div>
+            <div class="fair-grid">
+                <div><span>Round</span><code>{{ round.id }}</code></div>
+                <div><span>Server hash</span><code>{{ round.server_seed_hash }}</code></div>
+                <div><span>Server seed</span><code>{{ round.server_seed }}</code></div>
+                <div><span>Client seed</span><code>{{ round.client_seed }}</code></div>
+                <div><span>Nonce</span><code>{{ round.nonce }}</code></div>
+            </div>
+            <pre>{{ result|tojson(indent=2) }}</pre>
+        </article>
+    {% else %}
+        <div class="panel empty-row">No completed rounds yet.</div>
+    {% endfor %}
+</section>
+{% endblock %}

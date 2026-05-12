@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block title %}Lobby - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="lobby-hero">
+    <div>
+        <div class="section-kicker">Simulated chips only</div>
+        <h1>Nova Felt</h1>
+        <p>Seeded tables, shared rooms, quick rounds, and an admin desk for account control.</p>
+    </div>
+    <div class="hero-table">
+        <div class="hero-card ace">A</div>
+        <div class="hero-card king">K</div>
+        <div class="hero-chip"></div>
+    </div>
+</section>
+
+<section class="game-grid">
+    {% for name, endpoint, text in games %}
+        <a class="game-tile" href="{{ url_for(endpoint) }}">
+            <span class="game-icon {{ endpoint }}"></span>
+            <strong>{{ name }}</strong>
+            <small>{{ text }}</small>
+        </a>
+    {% endfor %}
+</section>
+
+<section class="panel-row">
+    <div class="panel">
+        <div class="panel-heading">
+            <h2>Recent fair rounds</h2>
+            <a href="{{ url_for('fairness') }}">View all</a>
+        </div>
+        <div class="compact-table">
+            {% for round in recent %}
+                <div>
+                    <span>{{ round.game.replace('_', ' ').title() }}</span>
+                    <code>{{ round.server_seed_hash[:18] }}...</code>
+                    <small>{{ round.created_at }}</small>
+                </div>
+            {% else %}
+                <div class="empty-row">No rounds yet.</div>
+            {% endfor %}
+        </div>
+    </div>
+    <div class="panel account-panel">
+        <h2>Bankroll</h2>
+        <div class="big-balance">{{ format_chips(current_user.balance) }}</div>
+        <p class="muted-line">Fake chips available.</p>
+        {% if current_user.role == 'admin' %}
+            <a class="button secondary" href="{{ url_for('admin') }}">Open admin desk</a>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}

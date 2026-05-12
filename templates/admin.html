@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block title %}Admin - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="page-heading">
+    <div>
+        <div class="section-kicker">Admin desk</div>
+        <h1>Users and chips</h1>
+    </div>
+</section>
+
+<section class="admin-grid">
+    {% for user in users %}
+        <article class="admin-user">
+            <div class="admin-user-head">
+                <div>
+                    <strong>{{ user.username }}</strong>
+                    <span>{{ user.role }}{% if user.disabled %} / disabled{% endif %}</span>
+                </div>
+                <div class="admin-balance">{{ format_chips(user.balance) }}</div>
+            </div>
+            <form method="post" class="inline-form">
+                <input type="hidden" name="user_id" value="{{ user.id }}">
+                <input type="hidden" name="action" value="set_balance">
+                <input name="balance" type="number" min="0" value="{{ user.balance }}">
+                <button class="button secondary small" type="submit">Set chips</button>
+            </form>
+            <form method="post" class="inline-form">
+                <input type="hidden" name="user_id" value="{{ user.id }}">
+                <input type="hidden" name="action" value="set_role">
+                <select name="role">
+                    <option value="user" {% if user.role == 'user' %}selected{% endif %}>user</option>
+                    <option value="admin" {% if user.role == 'admin' %}selected{% endif %}>admin</option>
+                </select>
+                <button class="button ghost small" type="submit">Role</button>
+            </form>
+            <form method="post" class="inline-form">
+                <input type="hidden" name="user_id" value="{{ user.id }}">
+                <input type="hidden" name="action" value="reset_password">
+                <input name="password" type="password" placeholder="New password">
+                <button class="button ghost small" type="submit">Password</button>
+            </form>
+            <form method="post">
+                <input type="hidden" name="user_id" value="{{ user.id }}">
+                <input type="hidden" name="action" value="toggle_disabled">
+                <button class="button danger small" type="submit">{{ 'Enable' if user.disabled else 'Disable' }}</button>
+            </form>
+        </article>
+    {% endfor %}
+</section>
+
+<section class="panel">
+    <div class="panel-heading">
+        <h2>Ledger</h2>
+    </div>
+    <div class="ledger">
+        {% for txn in transactions %}
+            <div>
+                <span>{{ txn.username }}</span>
+                <strong class="{{ 'positive' if txn.amount > 0 else 'negative' }}">{{ '%+d'|format(txn.amount) }}</strong>
+                <small>{{ txn.reason }}</small>
+                <time>{{ txn.created_at }}</time>
+            </div>
+        {% else %}
+            <div class="empty-row">No ledger entries yet.</div>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}

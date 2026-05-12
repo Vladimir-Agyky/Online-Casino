@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% from "macros.html" import fair_box %}
+
+{% block title %}Plinko - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="game-page plinko-stage">
+    <div class="game-board">
+        <div class="table-header">
+            <div>
+                <div class="section-kicker">Plinko</div>
+                <h1>Risk and rows</h1>
+            </div>
+            <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
+        </div>
+
+        {% set active_rows = result.rows if result else rows %}
+        <div
+            class="plinko-board"
+            data-plinko-board
+            data-rows="{{ active_rows }}"
+            data-path="{{ result.path|tojson if result else '[]' }}"
+            data-slot="{{ result.slot if result else '' }}"
+            style="--pocket-count: {{ multipliers|length }}"
+        >
+            <div class="plinko-ball" data-plinko-ball></div>
+            <div class="plinko-pegs">
+                {% for row in range(1, active_rows + 1) %}
+                    {% for peg in range(row + 1) %}
+                        <span style="--top: {{ ((row - 1) * 100 / active_rows)|round(3) }}%; --peg: {{ peg }}; --count: {{ row + 1 }}"></span>
+                    {% endfor %}
+                {% endfor %}
+            </div>
+            <div class="plinko-pockets">
+                {% for multiplier in multipliers %}
+                    <span>
+                        {{ format_multiplier(multiplier) }}x
+                    </span>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div data-plinko-result>
+            {% if result %}
+                <div class="result-banner {{ 'win' if result.net > 0 else ('push' if result.net == 0 else 'lose') }}">
+                    <strong>{{ format_multiplier(result.multiplier) }}x landed</strong>
+                    <span>{{ '%+d'|format(result.net) }} chips</span>
+                </div>
+                {{ fair_box(result.fair) }}
+            {% endif %}
+        </div>
+    </div>
+
+    <aside class="bet-panel">
+        <form method="post" class="stacked-form" data-plinko-form>
+            <label>
+                Bet
+                <input type="number" name="bet" min="1" value="{{ result.bet if result else 100 }}" required>
+            </label>
+            <label>
+                Client seed
+                <input name="client_seed" value="{{ current_user.username }}-plinko">
+            </label>
+            <label>
+                Rows
+                <input type="range" name="rows" min="8" max="16" value="{{ result.rows if result else rows }}" data-plinko-rows>
+                <span class="range-value"><strong data-plinko-row-label>{{ result.rows if result else rows }}</strong> rows</span>
+            </label>
+            <div class="segmented">
+                <label><input type="radio" name="risk" value="low" {% if risk == 'low' %}checked{% endif %}><span>Low</span></label>
+                <label><input type="radio" name="risk" value="medium" {% if risk == 'medium' %}checked{% endif %}><span>Medium</span></label>
+                <label><input type="radio" name="risk" value="high" {% if risk == 'high' %}checked{% endif %}><span>High</span></label>
+            </div>
+            <button class="button primary" type="submit">Drop ball</button>
+        </form>
+    </aside>
+</section>
+{% endblock %}

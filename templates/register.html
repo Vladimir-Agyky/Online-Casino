@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}Register - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="auth-layout">
+    <div class="auth-panel">
+        <div class="section-kicker">10,000 starting chips</div>
+        <h1>Create account</h1>
+        <form method="post" class="stacked-form">
+            <label>
+                Username
+                <input name="username" autocomplete="username" required autofocus>
+            </label>
+            <label>
+                Password
+                <input type="password" name="password" autocomplete="new-password" required>
+            </label>
+            <button class="button primary" type="submit">Create player</button>
+        </form>
+        <p class="muted-line">Already have an account? <a href="{{ url_for('login') }}">Sign in</a></p>
+    </div>
+    <div class="chip-stack-art">
+        <span></span><span></span><span></span><span></span><span></span>
+    </div>
+</section>
+{% endblock %}

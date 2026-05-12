@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% from "macros.html" import playing_card, fair_box %}
+
+{% block title %}Hi-Lo - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="game-page hilo-stage">
+    <div class="game-board">
+        <div class="table-header">
+            <div>
+                <div class="section-kicker">Hi-Lo</div>
+                <h1>Streak ladder</h1>
+            </div>
+            <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
+        </div>
+
+        <div class="hilo-range" aria-hidden="true">
+            {% for rank in ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"] %}
+                <span class="{{ 'active' if state.has_card and state.current.rank == rank else '' }}">{{ rank }}</span>
+            {% endfor %}
+        </div>
+
+        <div class="hilo-focus">
+            <div class="hilo-current-card">
+                {{ playing_card(state.current, order=0) }}
+            </div>
+            <div class="hilo-meter">
+                <span>Multiplier</span>
+                <strong>{{ '%.4g'|format(state.multiplier or 1) }}x</strong>
+                {% if state.active %}
+                    <small>Cashout {{ format_chips(state.cashout) }}</small>
+                {% elif state.last and state.last.outcome %}
+                    <small>{{ state.last.outcome.title() }}</small>
+                {% else %}
+                    <small>Press Play Game</small>
+                {% endif %}
+            </div>
+        </div>
+
+        {% if state.last and state.last.outcome %}
+            {% set net = state.last.net or 0 %}
+            <div class="result-banner result-reveal-pending {{ 'win' if net > 0 else ('push' if net == 0 else 'lose') }}">
+                <strong>{{ state.last.outcome.title() }}</strong>
+                <span>{{ '%+d'|format(net) }} chips</span>
+            </div>
+        {% endif %}
+
+        {% if state.history %}
+            <div class="hilo-history">
+                {% for item in state.history %}
+                    <div class="hilo-history-row {{ item.outcome }}">
+                        <div class="card-row compact">
+                            {{ playing_card(item.previous, mini=True, order=loop.index0 * 2) }}
+                            {{ playing_card(item.next, mini=True, order=loop.index0 * 2 + 1) }}
+                        </div>
+                        <div>
+                            <strong>
+                                {% if item.action == "skip" %}
+                                    Skip
+                                {% elif item.guess == "higher" %}
+                                    Higher
+                                {% else %}
+                                    Lower
+                                {% endif %}
+                            </strong>
+                            <span>{{ item.outcome.title() }}</span>
+                        </div>
+                        <small>{{ '%.4g'|format(item.multiplier or 1) }}x</small>
+                    </div>
+                {% endfor %}
+            </div>
+        {% endif %}
+
+        {% if state.last and state.last.fair %}
+            {{ fair_box(state.last.fair) }}
+        {% endif %}
+    </div>
+
+    <aside class="bet-panel">
+        {% if state.active %}
+            <div class="hilo-side-stats">
+                <div>
+                    <span>Bet</span>
+                    <strong>{{ format_chips(state.bet) }}</strong>
+                </div>
+                <div>
+                    <span>Cashout</span>
+                    <strong>{{ format_chips(state.cashout) }}</strong>
+                </div>
+            </div>
+            <form method="post" class="stacked-form hilo-actions">
+                <button class="button secondary hilo-choice" type="submit" name="action" value="higher">
+                    <span>Higher or Same</span>
+                    <strong>{{ '%.4g'|format(state.options.higher.multiplier) }}x</strong>
+                    <small>{{ '%.2f'|format(state.options.higher.chance) }}%</small>
+                </button>
+                <button class="button secondary hilo-choice" type="submit" name="action" value="lower">
+                    <span>Lower or Same</span>
+                    <strong>{{ '%.4g'|format(state.options.lower.multiplier) }}x</strong>
+                    <small>{{ '%.2f'|format(state.options.lower.chance) }}%</small>
+                </button>
+                <button class="button primary" type="submit" name="action" value="cashout">
+                    Cash Out {{ format_chips(state.cashout) }}
+                </button>
+                <button class="button ghost" type="submit" name="action" value="skip">
+                    Skip Card
+                </button>
+            </form>
+        {% else %}
+            <form method="post" class="stacked-form">
+                <input type="hidden" name="action" value="start">
+                <label>
+                    Bet
+                    <input type="number" name="bet" min="1" value="100" required>
+                </label>
+                <label>
+                    Client seed
+                    <input name="client_seed" value="{{ current_user.username }}-hilo">
+                </label>
+                <button class="button primary" type="submit">Play Game</button>
+            </form>
+        {% endif %}
+    </aside>
+</section>
+{% endblock %}

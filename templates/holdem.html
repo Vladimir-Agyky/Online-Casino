@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+
+{% block title %}Texas Hold'em - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="online-shell" data-game="holdem">
+    <div class="online-head">
+        <div>
+            <div class="section-kicker">Texas Hold'em</div>
+            <h1>Online poker table</h1>
+        </div>
+        <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
+    </div>
+    <div id="holdemApp" class="online-table poker-table">
+        <div class="loading-dot">Loading table</div>
+    </div>
+</section>
+{% endblock %}

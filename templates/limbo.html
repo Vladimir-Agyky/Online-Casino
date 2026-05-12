@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% from "macros.html" import fair_box %}
+
+{% block title %}Limbo - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="game-page limbo-stage">
+    <div class="game-board">
+        <div class="table-header">
+            <div>
+                <div class="section-kicker">Limbo</div>
+                <h1>Chase the multiplier</h1>
+            </div>
+            <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
+        </div>
+
+        <div class="limbo-meter {{ 'win' if result and result.win else 'lose' if result else '' }}">
+            <div class="limbo-line"></div>
+            <strong>{{ '%.2f'|format(result.crash) ~ 'x' if result else '1.00x' }}</strong>
+        </div>
+
+        {% if result %}
+            <div class="result-banner {{ 'win' if result.win else 'lose' }}">
+                <strong>{{ 'Hit' if result.win else 'Crash' }} at {{ '%.2f'|format(result.crash) }}x</strong>
+                <span>{{ '%+d'|format(result.net) }} chips</span>
+            </div>
+            {{ fair_box(result.fair) }}
+        {% endif %}
+    </div>
+
+    <aside class="bet-panel">
+        <form method="post" class="stacked-form">
+            <label>
+                Bet
+                <input type="number" name="bet" min="1" value="{{ result.bet if result else 100 }}" required>
+            </label>
+            <label>
+                Target
+                <input type="number" name="target" min="1.01" max="1000" step="0.01" value="{{ result.target if result else '2.00' }}" required>
+            </label>
+            <label>
+                Client seed
+                <input name="client_seed" value="{{ current_user.username }}-limbo">
+            </label>
+            <button class="button primary" type="submit">Launch</button>
+        </form>
+    </aside>
+</section>
+{% endblock %}

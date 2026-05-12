@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% from "macros.html" import playing_card, fair_box %}
+
+{% block title %}Baccarat - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="game-page baccarat-stage">
+    <div class="game-board">
+        <div class="table-header">
+            <div>
+                <div class="section-kicker">Baccarat</div>
+                <h1>Player vs Banker</h1>
+            </div>
+            <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
+        </div>
+
+        {% if result %}
+            <div class="result-banner result-reveal-pending {{ 'win' if result.net > 0 else ('push' if result.net == 0 else 'lose') }}">
+                <strong>{{ result.winner.title() }} wins</strong>
+                <span>{{ '%+d'|format(result.net) }} chips</span>
+            </div>
+            <div class="heads-up">
+                <div>
+                    <h2>Player <span class="result-reveal-pending" data-card-result>{{ result.player_total }}</span></h2>
+                    <div class="card-row">
+                        {% for card in result.player %}{{ playing_card(card, order=[0, 2, 4][loop.index0]) }}{% endfor %}
+                    </div>
+                </div>
+                <div>
+                    <h2>Banker <span class="result-reveal-pending" data-card-result>{{ result.banker_total }}</span></h2>
+                    <div class="card-row">
+                        {% for card in result.banker %}{{ playing_card(card, order=[1, 3, 5][loop.index0]) }}{% endfor %}
+                    </div>
+                </div>
+            </div>
+            {{ fair_box(result.fair) }}
+        {% endif %}
+    </div>
+
+    <aside class="bet-panel">
+        <form method="post" class="stacked-form">
+            <label>
+                Bet
+                <input type="number" name="bet" min="1" value="{{ result.bet if result else 100 }}" required>
+            </label>
+            <label>
+                Client seed
+                <input name="client_seed" value="{{ current_user.username }}-baccarat">
+            </label>
+            <div class="segmented">
+                <label><input type="radio" name="wager" value="player" checked><span>Player</span></label>
+                <label><input type="radio" name="wager" value="banker"><span>Banker</span></label>
+                <label><input type="radio" name="wager" value="tie"><span>Tie</span></label>
+            </div>
+            <button class="button primary" type="submit">Deal</button>
+        </form>
+    </aside>
+</section>
+{% endblock %}
