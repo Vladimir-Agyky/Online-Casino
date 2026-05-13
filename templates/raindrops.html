@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block title %}Raindrop - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="panel page-heading">
+    <div class="section-kicker">Community Event</div>
+    <h1>Raindrop</h1>
+    <p class="muted-line">Create an hourly fake-chip drop. Other players must join before the timer ends to receive a share.</p>
+</section>
+
+<section class="panel-row">
+    <div class="panel">
+        <div class="panel-heading">
+            <h2>Active and recent drops</h2>
+        </div>
+        <div class="raindrop-list">
+            {% for event in events %}
+                <div class="raindrop-card {{ event.status }}">
+                    <div>
+                        <strong>{{ event.creator_name }}</strong>
+                        <span>{{ format_chips(event.amount) }} chips</span>
+                    </div>
+                    <small>
+                        {{ event.status.title() }}
+                        {% if event.status == 'open' %}
+                            / Ends {{ event.expires_at }}
+                        {% elif event.share is defined %}
+                            / {{ format_chips(event.share) }} each
+                        {% endif %}
+                    </small>
+                    <div class="mini-shoe raindrop-joins">
+                        {% for item in event.joined %}
+                            <i>{{ item.username[0]|upper }}</i>
+                        {% else %}
+                            <em>No joins</em>
+                        {% endfor %}
+                    </div>
+                    {% if event.status == 'open' and event.creator_id != current_user.id %}
+                        <button class="button primary small" type="button" data-raindrop-join="{{ event.id }}">Join</button>
+                    {% endif %}
+                </div>
+            {% else %}
+                <div class="empty-row">No raindrops yet.</div>
+            {% endfor %}
+        </div>
+    </div>
+    <aside class="panel account-panel">
+        <h2>Create</h2>
+        <form method="post" class="stacked-form">
+            <label>
+                Amount
+                <input type="number" name="amount" min="1" value="1000" required>
+            </label>
+            <label>
+                Time
+                <input type="number" name="hours" min="1" max="168" value="1" required>
+                <span class="range-value"><strong>Hourly units</strong></span>
+            </label>
+            <button class="button primary" type="submit">Schedule Raindrop</button>
+        </form>
+    </aside>
+</section>
+{% endblock %}

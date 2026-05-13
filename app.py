@@ -1,11 +1,12 @@
 import hashlib
 import itertools
 import json
+import math
 import os
 import random
 import secrets
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 
 from flask import (
@@ -35,6 +36,10 @@ HILO_RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
 HILO_VALUE = {rank: index + 1 for index, rank in enumerate(HILO_RANKS)}
 HILO_HOUSE_EDGE = 0.01
 HILO_MAX_SKIPS = 52
+MINES_GRID_SIZE = 25
+MINES_RTP = 0.99
+TABLE_CHOICES = [1, 2, 3]
+LIVE_ROUND_SECONDS = 10
 RED_ROULETTE = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
 BLACK_ROULETTE = {n for n in range(1, 37)} - RED_ROULETTE
 ROULETTE_WHEEL_ORDER = [
@@ -111,18 +116,35 @@ PLINKO_RANGES = {
         16: (0.2, 1000.0),
     },
 }
+PLINKO_TARGET_RTP = {"low": 0.84, "medium": 0.86, "high": 0.88}
+PLINKO_RISK_SHAPE = {"low": 1.25, "medium": 2.0, "high": 3.2}
+PLINKO_EDGE_BOOST = {"low": 1.5, "medium": 4.8, "high": 18.0}
+PLINKO_MIN_MULTIPLIER = {"low": 0.35, "medium": 0.18, "high": 0.08}
 STARTING_BALANCE = 10000
 BLACKJACK_TABLE_KEY = "blackjack:main"
 HOLDEM_TABLE_KEY = "holdem:main"
 SMALL_BLIND = 10
 BIG_BLIND = 20
+SLOT_SYMBOLS = [
+    {"key": "seven", "label": "7", "weight": 2, "pay": 120},
+    {"key": "diamond", "label": "D", "weight": 4, "pay": 45},
+    {"key": "star", "label": "S", "weight": 7, "pay": 18},
+    {"key": "bell", "label": "B", "weight": 10, "pay": 10},
+    {"key": "cherry", "label": "C", "weight": 15, "pay": 5},
+    {"key": "lemon", "label": "L", "weight": 22, "pay": 3},
+    {"key": "bar", "label": "BAR", "weight": 12, "pay": 8},
+]
+SLOT_BONUS_SPINS = 10
+SLOT_BONUS_COST_MULTIPLIER = 35
 GAME_STATS_ENDPOINTS = {
     "baccarat": ("baccarat", "Baccarat"),
     "dragon_tiger": ("dragon_tiger", "Dragon Tiger"),
     "roulette": ("roulette", "Roulette"),
     "limbo": ("limbo", "Limbo"),
     "plinko": ("plinko", "Plinko"),
+    "mines": ("mines", "Mines"),
     "hilo": ("hilo", "Hi-Lo"),
+    "slots": ("slots", "Slots"),
     "blackjack": ("blackjack", "Blackjack"),
     "holdem": ("holdem", "Texas Hold'em"),
 }
@@ -132,7 +154,9 @@ GAME_NAME_SLUGS = {
     "Roulette": "roulette",
     "Limbo": "limbo",
     "Plinko": "plinko",
+    "Mines": "mines",
     "Hi-Lo": "hilo",
+    "Slots": "slots",
     "Blackjack": "blackjack",
     "Texas Hold'em": "holdem",
 }
@@ -140,6 +164,17 @@ GAME_NAME_SLUGS = {
 
 def utc_now():
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+def utc_from_iso(value):
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", ""))
+    except (TypeError, ValueError):
+        return datetime.utcnow()
+
+
+def utc_in(seconds):
+    return (datetime.utcnow() + timedelta(seconds=seconds)).isoformat(timespec="seconds") + "Z"
 
 
 def get_db():
@@ -194,6 +229,15 @@ def init_db():
             name TEXT PRIMARY KEY,
             state_json TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
         );
         """
     )
@@ -292,7 +336,8 @@ def get_balance(user_id):
 
 
 def is_game_transaction(reason):
-    return not reason.lower().startswith("admin ")
+    lowered = reason.lower()
+    return not (lowered.startswith("admin ") or lowered.startswith("raindrop "))
 
 
 def transaction_game_name(reason):
@@ -503,19 +548,20 @@ def format_multiplier(value):
 
 
 def plinko_multipliers(rows, risk):
-    low, high = PLINKO_RANGES[risk][rows]
     center = rows / 2
-    power = {"low": 2.35, "medium": 3.1, "high": 4.6}[risk]
-    center_distance = min(abs(slot - center) / center for slot in range(rows + 1))
-    multipliers = []
+    power = PLINKO_RISK_SHAPE[risk]
+    edge_boost = PLINKO_EDGE_BOOST[risk]
+    floor = PLINKO_MIN_MULTIPLIER[risk]
+    raw = []
     for slot in range(rows + 1):
         distance = abs(slot - center) / center
-        value = low + (high - low) * (distance**power)
-        if abs(distance - center_distance) < 0.001:
-            value = low
-        if slot in {0, rows}:
-            value = high
-        multipliers.append(round(value, 2))
+        raw.append(floor + edge_boost * (distance**power))
+    expected = sum(math.comb(rows, slot) * raw[slot] for slot in range(rows + 1)) / (2**rows)
+    scale = PLINKO_TARGET_RTP[risk] / expected
+    multipliers = []
+    for value in raw:
+        scaled = max(floor, value * scale)
+        multipliers.append(round(scaled, 2))
     return multipliers
 
 
@@ -604,6 +650,363 @@ def settle_wager(user_id, bet, payout, game):
     return payout - bet
 
 
+def table_number():
+    try:
+        selected = int(request.args.get("table", session.get("table_number", 1)))
+    except (TypeError, ValueError):
+        selected = 1
+    if selected not in TABLE_CHOICES:
+        selected = 1
+    session["table_number"] = selected
+    return selected
+
+
+def table_key(prefix):
+    return f"{prefix}:table:{table_number()}"
+
+
+def road_table_number():
+    try:
+        selected = int(request.values.get("table", request.args.get("table", session.get("table_number", 1))))
+    except (TypeError, ValueError):
+        selected = 1
+    if selected not in TABLE_CHOICES:
+        selected = 1
+    session["table_number"] = selected
+    return selected
+
+
+def road_state_name(game, table=None):
+    selected = table if table in TABLE_CHOICES else road_table_number()
+    return f"road:{game}:table:{selected}"
+
+
+def add_road_result(game, winner, table=None):
+    state = get_state(road_state_name(game, table), lambda: {"history": []})
+    state.setdefault("history", []).append({"winner": winner, "created_at": utc_now()})
+    state["history"] = state["history"][-90:]
+    set_state(road_state_name(game, table), state)
+    return state
+
+
+def road_history(game, table=None):
+    return get_state(road_state_name(game, table), lambda: {"history": []}).get("history", [])
+
+
+def selected_table_from_request():
+    if "table" not in request.values:
+        return None
+    return road_table_number()
+
+
+def live_table_key(game, table):
+    return f"live:{game}:table:{table}"
+
+
+def default_live_table_state(game, table):
+    return {
+        "game": game,
+        "table": table,
+        "round": 0,
+        "next_deal_at": utc_in(LIVE_ROUND_SECONDS),
+        "current": None,
+        "bets": {},
+    }
+
+
+def deal_baccarat_cards(rng):
+    deck = new_deck(rng)
+    player = [deck.pop(), deck.pop()]
+    banker = [deck.pop(), deck.pop()]
+    player_total = baccarat_total(player)
+    banker_total = baccarat_total(banker)
+    if player_total < 8 and banker_total < 8:
+        player_third = None
+        if player_total <= 5:
+            player_third = deck.pop()
+            player.append(player_third)
+            player_total = baccarat_total(player)
+        if player_third is None:
+            if banker_total <= 5:
+                banker.append(deck.pop())
+        else:
+            third_value = baccarat_value(player_third)
+            if (
+                banker_total <= 2
+                or (banker_total == 3 and third_value != 8)
+                or (banker_total == 4 and 2 <= third_value <= 7)
+                or (banker_total == 5 and 4 <= third_value <= 7)
+                or (banker_total == 6 and 6 <= third_value <= 7)
+            ):
+                banker.append(deck.pop())
+        banker_total = baccarat_total(banker)
+    if player_total > banker_total:
+        winner = "player"
+    elif banker_total > player_total:
+        winner = "banker"
+    else:
+        winner = "tie"
+    return {
+        "player": player,
+        "banker": banker,
+        "player_total": player_total,
+        "banker_total": banker_total,
+        "winner": winner,
+    }
+
+
+def deal_dragon_tiger_cards(rng):
+    deck = new_deck(rng)
+    dragon = deck.pop()
+    tiger = deck.pop()
+    dragon_value = card_rank_value(dragon)
+    tiger_value = card_rank_value(tiger)
+    if dragon_value > tiger_value:
+        winner = "dragon"
+    elif tiger_value > dragon_value:
+        winner = "tiger"
+    else:
+        winner = "tie"
+    return {
+        "dragon": dragon,
+        "tiger": tiger,
+        "dragon_total": dragon_value,
+        "tiger_total": tiger_value,
+        "winner": winner,
+    }
+
+
+def live_round_payout(game, wager, winner, bet):
+    if game == "baccarat":
+        if winner == "tie":
+            return bet
+        if wager == winner:
+            return int(bet * 1.95) if winner == "banker" else bet * 2
+        return 0
+    if winner == "tie":
+        return bet // 2
+    return bet * 2 if wager == winner else 0
+
+
+def live_table_state(game, table):
+    key = live_table_key(game, table)
+    row = get_db().execute("SELECT state_json FROM game_states WHERE name = ?", (key,)).fetchone()
+    if row:
+        return json.loads(row["state_json"])
+    state = default_live_table_state(game, table)
+    set_state(key, state)
+    get_db().commit()
+    return state
+
+
+def advance_live_table(game, table):
+    state = live_table_state(game, table)
+    changed = False
+    now = datetime.utcnow()
+    steps = 0
+    while utc_from_iso(state.get("next_deal_at")) <= now and steps < 12:
+        bets = state.get("bets", {})
+        seed_parts = [
+            f"{uid}:{bet['username']}:{bet['wager']}:{bet['bet']}:{bet.get('client_seed') or ''}"
+            for uid, bet in sorted(bets.items())
+        ]
+        client_seed = "|".join(seed_parts) if seed_parts else f"table-{table}-{state.get('round', 0) + 1}"
+        ctx = begin_fair(game, client_seed)
+        dealt = deal_baccarat_cards(ctx["rng"]) if game == "baccarat" else deal_dragon_tiger_cards(ctx["rng"])
+        winner = dealt["winner"]
+        settlements = []
+        for uid, bet_info in bets.items():
+            bet = int(bet_info["bet"])
+            payout = live_round_payout(game, bet_info["wager"], winner, bet)
+            net = payout - bet
+            if payout > 0:
+                change_balance(int(uid), payout, f"{'Baccarat' if game == 'baccarat' else 'Dragon Tiger'} payout")
+            settlements.append(
+                {
+                    "user_id": uid,
+                    "username": bet_info["username"],
+                    "wager": bet_info["wager"],
+                    "bet": bet,
+                    "payout": payout,
+                    "net": net,
+                }
+            )
+        result_payload = {
+            "player_name": ", ".join(item["username"] for item in settlements) if settlements else "Table",
+            "table": table,
+            "round": int(state.get("round", 0)) + 1,
+            "winner": winner,
+            "bet": sum(item["bet"] for item in settlements),
+            "payout": sum(item["payout"] for item in settlements),
+            "net": sum(item["net"] for item in settlements),
+            "settlements": settlements,
+        }
+        if game == "baccarat":
+            result_payload.update(
+                {
+                    "player": [card_label(card) for card in dealt["player"]],
+                    "banker": [card_label(card) for card in dealt["banker"]],
+                    "player_total": dealt["player_total"],
+                    "banker_total": dealt["banker_total"],
+                }
+            )
+        else:
+            result_payload.update({"dragon": card_label(dealt["dragon"]), "tiger": card_label(dealt["tiger"])})
+        fair = finish_fair(game, ctx["pending"], ctx["client_seed"], result_payload)
+        state["round"] = int(state.get("round", 0)) + 1
+        state["current"] = {
+            **dealt,
+            "round": state["round"],
+            "settlements": settlements,
+            "fair": fair,
+            "created_at": utc_now(),
+        }
+        state["bets"] = {}
+        add_road_result(game, winner, table)
+        state["next_deal_at"] = (utc_from_iso(state.get("next_deal_at")) + timedelta(seconds=LIVE_ROUND_SECONDS)).isoformat(timespec="seconds") + "Z"
+        changed = True
+        steps += 1
+    if utc_from_iso(state.get("next_deal_at")) <= now:
+        state["next_deal_at"] = utc_in(LIVE_ROUND_SECONDS)
+        changed = True
+    if changed:
+        set_state(live_table_key(game, table), state)
+        get_db().commit()
+    return state
+
+
+def live_public_state(game, table, user_id):
+    state = advance_live_table(game, table)
+    current = state.get("current")
+    pending_bet = (state.get("bets") or {}).get(str(user_id))
+    countdown = max(0, int((utc_from_iso(state.get("next_deal_at")) - datetime.utcnow()).total_seconds()))
+    return {
+        "game": game,
+        "table": table,
+        "round": state.get("round", 0),
+        "countdown": countdown,
+        "next_deal_at": state.get("next_deal_at"),
+        "current": current,
+        "pending_bet": pending_bet,
+        "history": road_history(game, table),
+        "my_balance": get_balance(user_id),
+        "me": str(user_id),
+    }
+
+
+def place_live_table_bet(game, table, user_id, username, bet, wager, client_seed):
+    state = advance_live_table(game, table)
+    if str(user_id) in state.get("bets", {}):
+        return None, "You already have a bet locked for the next round."
+    if max(0, int((utc_from_iso(state.get("next_deal_at")) - datetime.utcnow()).total_seconds())) <= 0:
+        state = advance_live_table(game, table)
+    error = debit_or_error(user_id, bet, f"{'Baccarat' if game == 'baccarat' else 'Dragon Tiger'} bet")
+    if error:
+        get_db().commit()
+        return None, error
+    state.setdefault("bets", {})[str(user_id)] = {
+        "username": username,
+        "bet": bet,
+        "wager": wager,
+        "client_seed": (client_seed or "").strip(),
+        "created_at": utc_now(),
+    }
+    set_state(live_table_key(game, table), state)
+    get_db().commit()
+    return state, None
+
+
+def table_summaries(game):
+    rows = []
+    for number in TABLE_CHOICES:
+        if game == "blackjack":
+            state = get_state(f"blackjack:table:{number}", default_blackjack_state)
+            rows.append(
+                {
+                    "number": number,
+                    "players": len(state.get("players", {})),
+                    "capacity": 5,
+                    "phase": state.get("phase", "waiting"),
+                    "shoe": [],
+                }
+            )
+        elif game == "holdem":
+            state = get_state(f"holdem:table:{number}", default_holdem_state)
+            rows.append(
+                {
+                    "number": number,
+                    "players": len(state.get("players", {})),
+                    "capacity": 8,
+                    "phase": state.get("phase", "waiting"),
+                    "shoe": [],
+                }
+            )
+        elif game in {"baccarat", "dragon_tiger"}:
+            advance_live_table(game, number)
+            history = road_history(game, number)
+            rows.append(
+                {
+                    "number": number,
+                    "players": 0,
+                    "capacity": None,
+                    "phase": "live shoe",
+                    "shoe": history[-12:],
+                }
+            )
+    return rows
+
+
+def raindrop_state():
+    return get_state("raindrop:events", lambda: {"events": []})
+
+
+def save_raindrop_state(state):
+    state["events"] = state.get("events", [])[-60:]
+    set_state("raindrop:events", state)
+
+
+def settle_raindrops():
+    state = raindrop_state()
+    changed = False
+    now = datetime.utcnow()
+    for event in state.get("events", []):
+        if event.get("status") != "open":
+            continue
+        if utc_from_iso(event.get("expires_at")) > now:
+            continue
+        joined = event.get("joined", [])
+        amount = int(event.get("amount") or 0)
+        if joined:
+            share = amount // len(joined)
+            paid_total = share * len(joined)
+            for joined_user in joined:
+                change_balance(int(joined_user["id"]), share, "Raindrop received")
+            event["status"] = "paid"
+            event["share"] = share
+            event["paid_total"] = paid_total
+            message = f"{event['creator_name']}'s raindrop paid {format_chips(share)} chips each to {len(joined)} players."
+            get_db().execute(
+                "INSERT INTO chat_messages (user_id, username, message, created_at) VALUES (?, ?, ?, ?)",
+                (event["creator_id"], "Raindrop", message, utc_now()),
+            )
+        else:
+            change_balance(int(event["creator_id"]), amount, "Raindrop refunded")
+            event["status"] = "refunded"
+            event["share"] = 0
+            event["paid_total"] = 0
+        event["settled_at"] = utc_now()
+        changed = True
+    if changed:
+        save_raindrop_state(state)
+        get_db().commit()
+    return state
+
+
+def open_raindrops():
+    state = settle_raindrops()
+    return [event for event in state.get("events", []) if event.get("status") == "open"]
+
+
 @app.route("/")
 @login_required
 def lobby():
@@ -615,12 +1018,14 @@ def lobby():
         ("Roulette", "roulette", "European wheel with inside and outside bets."),
         ("Limbo", "limbo", "Multiplier chase with hash-based results."),
         ("Plinko", "plinko", "Peg board with rows, risk, and edge multipliers."),
+        ("Mines", "mines", "Twenty-five tiles, gems, bombs, and cashouts."),
+        ("Slots", "slots", "Buy spins, chase features, and roll for a fake jackpot."),
         ("Hi-Lo", "hilo", "Call the next card higher or lower."),
     ]
     recent = get_db().execute(
         "SELECT * FROM fair_rounds ORDER BY created_at DESC LIMIT 6"
     ).fetchall()
-    return render_template("lobby.html", games=games, recent=recent)
+    return render_template("lobby.html", games=games, recent=recent, raindrops=open_raindrops()[:3])
 
 
 @app.route("/register", methods=["GET", "POST"])
@@ -745,6 +1150,139 @@ def api_me():
     )
 
 
+@app.route("/api/chat", methods=["GET", "POST"])
+@login_required
+def api_chat():
+    db = get_db()
+    if request.method == "POST":
+        message = " ".join((request.form.get("message") or "").split())
+        if not message:
+            return jsonify({"error": "Type a message first."}), 400
+        if len(message) > 240:
+            return jsonify({"error": "Chat messages must be 240 characters or less."}), 400
+        db.execute(
+            "INSERT INTO chat_messages (user_id, username, message, created_at) VALUES (?, ?, ?, ?)",
+            (g.user["id"], g.user["username"], message, utc_now()),
+        )
+        db.commit()
+    rows = db.execute(
+        "SELECT id, username, message, created_at FROM chat_messages ORDER BY id DESC LIMIT 80"
+    ).fetchall()
+    return jsonify(
+        {
+            "messages": [
+                {
+                    "id": row["id"],
+                    "username": row["username"],
+                    "message": row["message"],
+                    "created_at": row["created_at"],
+                }
+                for row in reversed(rows)
+            ]
+        }
+    )
+
+
+@app.route("/api/raindrop", methods=["POST"])
+@login_required
+def api_raindrop():
+    try:
+        amount = parse_positive_int(request.form.get("amount"), minimum=1, maximum=1_000_000)
+        count = parse_positive_int(request.form.get("count"), minimum=1, maximum=25)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if get_balance(g.user["id"]) < amount:
+        return jsonify({"error": "Not enough fake chips for that raindrop."}), 400
+    rows = get_db().execute(
+        """
+        SELECT id, username
+        FROM users
+        WHERE disabled = 0 AND id != ?
+        ORDER BY RANDOM()
+        LIMIT ?
+        """,
+        (g.user["id"], count),
+    ).fetchall()
+    if not rows:
+        return jsonify({"error": "There are no other enabled users to receive the raindrop."}), 400
+    share = amount // len(rows)
+    if share <= 0:
+        return jsonify({"error": "Increase the amount so every receiver gets at least 1 chip."}), 400
+    total = share * len(rows)
+    change_balance(g.user["id"], -total, "Raindrop sent")
+    recipients = []
+    for row in rows:
+        change_balance(row["id"], share, "Raindrop received")
+        recipients.append(row["username"])
+    message = f"{g.user['username']} made it rain {format_chips(total)} chips: {format_chips(share)} each to {', '.join(recipients)}"
+    get_db().execute(
+        "INSERT INTO chat_messages (user_id, username, message, created_at) VALUES (?, ?, ?, ?)",
+        (g.user["id"], "Raindrop", message, utc_now()),
+    )
+    get_db().commit()
+    return jsonify({"amount": total, "share": share, "recipients": recipients, "balance": get_balance(g.user["id"])})
+
+
+@app.route("/raindrops", methods=["GET", "POST"])
+@login_required
+def raindrops():
+    if request.method == "POST":
+        try:
+            amount = parse_positive_int(request.form.get("amount"), minimum=1, maximum=1_000_000)
+            hours = parse_positive_int(request.form.get("hours"), minimum=1, maximum=168)
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("raindrops"))
+        error = debit_or_error(g.user["id"], amount, "Raindrop sent")
+        if error:
+            flash(error, "error")
+            get_db().commit()
+            return redirect(url_for("raindrops"))
+        state = settle_raindrops()
+        event = {
+            "id": secrets.token_hex(8),
+            "creator_id": g.user["id"],
+            "creator_name": g.user["username"],
+            "amount": amount,
+            "hours": hours,
+            "created_at": utc_now(),
+            "expires_at": utc_in(hours * 3600),
+            "joined": [],
+            "status": "open",
+        }
+        state.setdefault("events", []).append(event)
+        save_raindrop_state(state)
+        get_db().execute(
+            "INSERT INTO chat_messages (user_id, username, message, created_at) VALUES (?, ?, ?, ?)",
+            (g.user["id"], "Raindrop", f"{g.user['username']} opened a {format_chips(amount)} chip raindrop. Join from the Raindrop tab.", utc_now()),
+        )
+        get_db().commit()
+        flash("Raindrop scheduled. It pays only to players who join before the timer ends.", "success")
+        return redirect(url_for("raindrops"))
+    return render_template("raindrops.html", events=reversed(settle_raindrops().get("events", [])))
+
+
+@app.route("/api/raindrops/<event_id>/join", methods=["POST"])
+@login_required
+def api_raindrop_join(event_id):
+    state = settle_raindrops()
+    for event in state.get("events", []):
+        if event.get("id") != event_id:
+            continue
+        if event.get("status") != "open":
+            return jsonify({"error": "That raindrop is already closed."}), 400
+        if int(event["creator_id"]) == int(g.user["id"]):
+            return jsonify({"error": "You cannot join your own raindrop."}), 400
+        joined = event.setdefault("joined", [])
+        if any(int(item["id"]) == int(g.user["id"]) for item in joined):
+            return jsonify({"error": "You already joined this raindrop."}), 400
+        joined.append({"id": g.user["id"], "username": g.user["username"], "joined_at": utc_now()})
+        save_raindrop_state(state)
+        get_db().commit()
+        return jsonify({"event": event, "joined": len(joined)})
+    return jsonify({"error": "Raindrop not found."}), 404
+
+
 @app.route("/api/profit-loss")
 @login_required
 def api_profit_loss():
@@ -817,157 +1355,134 @@ def fairness():
 @app.route("/baccarat", methods=["GET", "POST"])
 @login_required
 def baccarat():
-    result = None
+    selected_table = selected_table_from_request()
     if request.method == "POST":
+        selected_table = selected_table or road_table_number()
         try:
             bet = parse_positive_int(request.form.get("bet"))
         except ValueError as exc:
             flash(str(exc), "error")
-            return redirect(url_for("baccarat"))
+            return redirect(url_for("baccarat", table=selected_table))
         wager = request.form.get("wager")
         if wager not in {"player", "banker", "tie"}:
             flash("Choose Player, Banker, or Tie.", "error")
-            return redirect(url_for("baccarat"))
-        error = debit_or_error(g.user["id"], bet, "Baccarat bet")
+            return redirect(url_for("baccarat", table=selected_table))
+        _state, error = place_live_table_bet(
+            "baccarat",
+            selected_table,
+            g.user["id"],
+            g.user["username"],
+            bet,
+            wager,
+            request.form.get("client_seed"),
+        )
         if error:
             flash(error, "error")
-            get_db().commit()
-            return redirect(url_for("baccarat"))
-
-        ctx = begin_fair("baccarat", request.form.get("client_seed"))
-        deck = new_deck(ctx["rng"])
-        player = [deck.pop(), deck.pop()]
-        banker = [deck.pop(), deck.pop()]
-        player_total = baccarat_total(player)
-        banker_total = baccarat_total(banker)
-        if player_total < 8 and banker_total < 8:
-            player_third = None
-            if player_total <= 5:
-                player_third = deck.pop()
-                player.append(player_third)
-                player_total = baccarat_total(player)
-            if player_third is None:
-                if banker_total <= 5:
-                    banker.append(deck.pop())
-            else:
-                third_value = baccarat_value(player_third)
-                if (
-                    banker_total <= 2
-                    or (banker_total == 3 and third_value != 8)
-                    or (banker_total == 4 and 2 <= third_value <= 7)
-                    or (banker_total == 5 and 4 <= third_value <= 7)
-                    or (banker_total == 6 and 6 <= third_value <= 7)
-                ):
-                    banker.append(deck.pop())
-            banker_total = baccarat_total(banker)
-
-        if player_total > banker_total:
-            winner = "player"
-        elif banker_total > player_total:
-            winner = "banker"
         else:
-            winner = "tie"
-
-        payout = 0
-        if winner == "tie":
-            payout = bet
-        elif wager == winner:
-            if winner == "banker":
-                payout = int(bet * 1.95)
-            else:
-                payout = bet * 2
-        net = settle_wager(g.user["id"], bet, payout, "Baccarat")
-        fair = finish_fair(
-            "baccarat",
-            ctx["pending"],
-            ctx["client_seed"],
-            {
-                "wager": wager,
-                "winner": winner,
-                "player": [card_label(card) for card in player],
-                "banker": [card_label(card) for card in banker],
-                "player_total": player_total,
-                "banker_total": banker_total,
-                "payout": payout,
-            },
-        )
-        get_db().commit()
-        result = {
-            "bet": bet,
-            "wager": wager,
-            "winner": winner,
-            "player": player,
-            "banker": banker,
-            "player_total": player_total,
-            "banker_total": banker_total,
-            "payout": payout,
-            "net": net,
-            "fair": fair,
-        }
-    return render_template("baccarat.html", result=result)
+            flash("Bet locked for the next Baccarat round.", "success")
+        return redirect(url_for("baccarat", table=selected_table))
+    return render_template(
+        "baccarat.html",
+        table_number=selected_table,
+        tables=table_summaries("baccarat"),
+    )
 
 
 @app.route("/dragon-tiger", methods=["GET", "POST"])
 @login_required
 def dragon_tiger():
-    result = None
+    selected_table = selected_table_from_request()
     if request.method == "POST":
+        selected_table = selected_table or road_table_number()
         try:
             bet = parse_positive_int(request.form.get("bet"))
         except ValueError as exc:
             flash(str(exc), "error")
-            return redirect(url_for("dragon_tiger"))
+            return redirect(url_for("dragon_tiger", table=selected_table))
         wager = request.form.get("wager")
         if wager not in {"dragon", "tiger", "tie"}:
             flash("Choose Dragon, Tiger, or Tie.", "error")
-            return redirect(url_for("dragon_tiger"))
-        error = debit_or_error(g.user["id"], bet, "Dragon Tiger bet")
+            return redirect(url_for("dragon_tiger", table=selected_table))
+        _state, error = place_live_table_bet(
+            "dragon_tiger",
+            selected_table,
+            g.user["id"],
+            g.user["username"],
+            bet,
+            wager,
+            request.form.get("client_seed"),
+        )
         if error:
             flash(error, "error")
-            get_db().commit()
-            return redirect(url_for("dragon_tiger"))
-        ctx = begin_fair("dragon_tiger", request.form.get("client_seed"))
-        deck = new_deck(ctx["rng"])
-        dragon = deck.pop()
-        tiger = deck.pop()
-        dragon_value = card_rank_value(dragon)
-        tiger_value = card_rank_value(tiger)
-        if dragon_value > tiger_value:
-            winner = "dragon"
-        elif tiger_value > dragon_value:
-            winner = "tiger"
         else:
-            winner = "tie"
-        payout = 0
-        if winner == "tie":
-            payout = bet // 2
-        elif wager == winner:
-            payout = bet * 2
-        net = settle_wager(g.user["id"], bet, payout, "Dragon Tiger")
-        fair = finish_fair(
-            "dragon_tiger",
-            ctx["pending"],
-            ctx["client_seed"],
-            {
-                "wager": wager,
-                "winner": winner,
-                "dragon": card_label(dragon),
-                "tiger": card_label(tiger),
-                "payout": payout,
-            },
-        )
-        get_db().commit()
-        result = {
-            "bet": bet,
-            "wager": wager,
-            "winner": winner,
-            "dragon": dragon,
-            "tiger": tiger,
-            "payout": payout,
-            "net": net,
-            "fair": fair,
-        }
-    return render_template("dragon_tiger.html", result=result)
+            flash("Bet locked for the next Dragon Tiger round.", "success")
+        return redirect(url_for("dragon_tiger", table=selected_table))
+    return render_template(
+        "dragon_tiger.html",
+        table_number=selected_table,
+        tables=table_summaries("dragon_tiger"),
+    )
+
+
+@app.route("/api/roads/<game>")
+@login_required
+def api_roads(game):
+    if game not in {"baccarat", "dragon_tiger"}:
+        return jsonify({"error": "Unknown road game."}), 404
+    selected_table = road_table_number()
+    advance_live_table(game, selected_table)
+    return jsonify({"history": road_history(game, selected_table), "table": selected_table})
+
+
+@app.route("/api/live/<game>/state")
+@login_required
+def api_live_table_state(game):
+    if game not in {"baccarat", "dragon_tiger"}:
+        return jsonify({"error": "Unknown live table."}), 404
+    selected_table = road_table_number()
+    return jsonify(live_public_state(game, selected_table, g.user["id"]))
+
+
+@app.route("/api/live/<game>/bet", methods=["POST"])
+@login_required
+def api_live_table_bet(game):
+    if game not in {"baccarat", "dragon_tiger"}:
+        return jsonify({"error": "Unknown live table."}), 404
+    selected_table = road_table_number()
+    allowed = {"player", "banker", "tie"} if game == "baccarat" else {"dragon", "tiger", "tie"}
+    wager = request.form.get("wager")
+    if wager not in allowed:
+        return jsonify({"error": "Choose a valid betting side."}), 400
+    try:
+        bet = parse_positive_int(request.form.get("bet"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    _state, error = place_live_table_bet(
+        game,
+        selected_table,
+        g.user["id"],
+        g.user["username"],
+        bet,
+        wager,
+        request.form.get("client_seed"),
+    )
+    if error:
+        return jsonify({"error": error}), 400
+    return jsonify(live_public_state(game, selected_table, g.user["id"]))
+
+
+@app.route("/api/baccarat/no-bet", methods=["POST"])
+@login_required
+def api_baccarat_no_bet():
+    selected_table = road_table_number()
+    return jsonify(live_public_state("baccarat", selected_table, g.user["id"]))
+
+
+@app.route("/api/dragon-tiger/no-bet", methods=["POST"])
+@login_required
+def api_dragon_no_bet():
+    selected_table = road_table_number()
+    return jsonify(live_public_state("dragon_tiger", selected_table, g.user["id"]))
 
 
 @app.route("/roulette", methods=["GET", "POST"])
@@ -1062,6 +1577,9 @@ def roulette():
                 "color": color,
                 "win": win,
                 "payout": payout,
+                "bet": bet,
+                "net": net,
+                "player_name": g.user["username"],
             },
         )
         get_db().commit()
@@ -1123,11 +1641,67 @@ def limbo():
             "limbo",
             ctx["pending"],
             ctx["client_seed"],
-            {"target": target, "crash": crash, "win": win, "payout": payout},
+            {
+                "target": target,
+                "crash": crash,
+                "win": win,
+                "payout": payout,
+                "bet": bet,
+                "net": net,
+                "player_name": g.user["username"],
+            },
         )
         get_db().commit()
         result = {"bet": bet, "target": target, "crash": crash, "win": win, "payout": payout, "net": net, "fair": fair}
     return render_template("limbo.html", result=result)
+
+
+@app.route("/api/limbo/play", methods=["POST"])
+@login_required
+def api_limbo_play():
+    try:
+        bet = parse_positive_int(request.form.get("bet"))
+        target = float(request.form.get("target", "2"))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Enter a valid bet and target multiplier."}), 400
+    if target < 1.01 or target > 1000:
+        return jsonify({"error": "Target must be between 1.01x and 1000x."}), 400
+    error = debit_or_error(g.user["id"], bet, "Limbo bet")
+    if error:
+        get_db().commit()
+        return jsonify({"error": error}), 400
+    ctx = begin_fair("limbo", request.form.get("client_seed"))
+    crash = limbo_crash(ctx["pending"]["server_seed"], ctx["client_seed"], ctx["pending"]["nonce"])
+    win = crash >= target
+    payout = int(bet * target) if win else 0
+    net = settle_wager(g.user["id"], bet, payout, "Limbo")
+    fair = finish_fair(
+        "limbo",
+        ctx["pending"],
+        ctx["client_seed"],
+        {
+            "target": target,
+            "crash": crash,
+            "win": win,
+            "payout": payout,
+            "bet": bet,
+            "net": net,
+            "player_name": g.user["username"],
+        },
+    )
+    get_db().commit()
+    return jsonify(
+        {
+            "bet": bet,
+            "target": target,
+            "crash": crash,
+            "win": win,
+            "payout": payout,
+            "net": net,
+            "balance": get_balance(g.user["id"]),
+            "fair": fair,
+        }
+    )
 
 
 @app.route("/plinko", methods=["GET", "POST"])
@@ -1171,6 +1745,9 @@ def plinko():
                 "slot": slot,
                 "multiplier": multiplier,
                 "payout": payout,
+                "bet": bet,
+                "net": net,
+                "player_name": g.user["username"],
             },
         )
         get_db().commit()
@@ -1229,6 +1806,9 @@ def api_plinko_drop():
             "slot": slot,
             "multiplier": multiplier,
             "payout": payout,
+            "bet": bet,
+            "net": net,
+            "player_name": g.user["username"],
         },
     )
     get_db().commit()
@@ -1244,6 +1824,335 @@ def api_plinko_drop():
             "multiplier_label": format_multiplier(multiplier),
             "payout": payout,
             "net": net,
+            "balance": get_balance(g.user["id"]),
+            "fair": fair,
+        }
+    )
+
+
+@app.route("/api/plinko/multipliers")
+@login_required
+def api_plinko_multipliers():
+    try:
+        rows = parse_positive_int(request.args.get("rows"), minimum=8, maximum=16)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    risk = request.args.get("risk", "medium")
+    if risk not in PLINKO_RANGES:
+        return jsonify({"error": "Choose Low, Medium, or High risk."}), 400
+    return jsonify({"rows": rows, "risk": risk, "multipliers": plinko_multipliers(rows, risk)})
+
+
+def mines_multiplier(mine_count, revealed_count):
+    revealed_count = int(revealed_count)
+    mine_count = int(mine_count)
+    safe_tiles = MINES_GRID_SIZE - mine_count
+    if revealed_count <= 0:
+        return 1.0
+    if revealed_count > safe_tiles:
+        return 0
+    survival = math.comb(safe_tiles, revealed_count) / math.comb(MINES_GRID_SIZE, revealed_count)
+    return round(MINES_RTP / survival, 4)
+
+
+def mines_next_multiplier(mine_count, revealed_count):
+    safe_tiles = MINES_GRID_SIZE - int(mine_count)
+    if revealed_count >= safe_tiles:
+        return None
+    return mines_multiplier(mine_count, revealed_count + 1)
+
+
+def mines_default_state():
+    return {
+        "active": False,
+        "bet": 0,
+        "mine_count": 3,
+        "revealed": [],
+        "mines": [],
+        "multiplier": 1.0,
+        "last": None,
+    }
+
+
+def mines_state(user_id):
+    return get_state(f"mines:{user_id}", mines_default_state)
+
+
+def mines_public(state):
+    public = dict(state)
+    public.pop("pending", None)
+    public.pop("client_seed", None)
+    public["revealed"] = list(state.get("revealed") or [])
+    public["mine_count"] = int(state.get("mine_count") or 3)
+    public["multiplier"] = float(state.get("multiplier") or 1.0)
+    public["cashout"] = int(int(state.get("bet") or 0) * public["multiplier"]) if state.get("active") else 0
+    public["next_multiplier"] = mines_next_multiplier(public["mine_count"], len(public["revealed"])) if state.get("active") else None
+    if state.get("active"):
+        public["mines"] = []
+    else:
+        public["mines"] = list(state.get("mines") or [])
+    return public
+
+
+def finish_mines_round(state, outcome, payout, selected=None):
+    bet = int(state.get("bet") or 0)
+    net = payout - bet
+    fair = finish_fair(
+        "mines",
+        state["pending"],
+        state["client_seed"],
+        {
+            "player_name": g.user["username"],
+            "bet": bet,
+            "mine_count": state["mine_count"],
+            "revealed": state.get("revealed", []),
+            "mines": state.get("mines", []),
+            "selected": selected,
+            "outcome": outcome,
+            "multiplier": round(float(state.get("multiplier") or 1.0), 4),
+            "payout": payout,
+            "net": net,
+        },
+    )
+    state["active"] = False
+    state["last"] = {
+        "outcome": outcome,
+        "bet": bet,
+        "payout": payout,
+        "net": net,
+        "multiplier": round(float(state.get("multiplier") or 1.0), 4),
+        "selected": selected,
+        "fair": fair,
+    }
+    state["pending"] = None
+    state["client_seed"] = ""
+    return state
+
+
+@app.route("/mines")
+@login_required
+def mines():
+    return render_template("mines.html", state=mines_public(mines_state(g.user["id"])))
+
+
+@app.route("/api/mines/state")
+@login_required
+def api_mines_state():
+    return jsonify({"state": mines_public(mines_state(g.user["id"])), "balance": get_balance(g.user["id"])})
+
+
+@app.route("/api/mines/start", methods=["POST"])
+@login_required
+def api_mines_start():
+    state = mines_state(g.user["id"])
+    if state.get("active"):
+        return jsonify({"error": "Cash out or hit a mine before starting another round."}), 400
+    try:
+        bet = parse_positive_int(request.form.get("bet"))
+        mine_count = parse_positive_int(request.form.get("mines"), minimum=1, maximum=24)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    error = debit_or_error(g.user["id"], bet, "Mines bet")
+    if error:
+        get_db().commit()
+        return jsonify({"error": error}), 400
+    ctx = begin_fair("mines", request.form.get("client_seed"))
+    mine_positions = sorted(ctx["rng"].sample(range(MINES_GRID_SIZE), mine_count))
+    state = {
+        "active": True,
+        "bet": bet,
+        "mine_count": mine_count,
+        "revealed": [],
+        "mines": mine_positions,
+        "multiplier": 1.0,
+        "pending": ctx["pending"],
+        "client_seed": ctx["client_seed"],
+        "last": None,
+    }
+    set_state(f"mines:{g.user['id']}", state)
+    get_db().commit()
+    return jsonify({"state": mines_public(state), "balance": get_balance(g.user["id"])})
+
+
+@app.route("/api/mines/reveal", methods=["POST"])
+@login_required
+def api_mines_reveal():
+    try:
+        tile = parse_positive_int(request.form.get("tile"), minimum=0, maximum=MINES_GRID_SIZE - 1)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return reveal_mines_tile(tile)
+
+
+def reveal_mines_tile(tile):
+    state = mines_state(g.user["id"])
+    if not state.get("active"):
+        return jsonify({"error": "Start a Mines round first."}), 400
+    if tile in state.get("revealed", []):
+        return jsonify({"error": "That tile is already open."}), 400
+    if tile in state.get("mines", []):
+        state = finish_mines_round(state, "lose", 0, selected=tile)
+        set_state(f"mines:{g.user['id']}", state)
+        get_db().commit()
+        return jsonify({"state": mines_public(state), "balance": get_balance(g.user["id"]), "outcome": "lose"})
+    state.setdefault("revealed", []).append(tile)
+    state["revealed"].sort()
+    state["multiplier"] = mines_multiplier(state["mine_count"], len(state["revealed"]))
+    safe_tiles = MINES_GRID_SIZE - int(state["mine_count"])
+    outcome = "gem"
+    if len(state["revealed"]) >= safe_tiles:
+        payout = int(int(state["bet"]) * float(state["multiplier"]))
+        change_balance(g.user["id"], payout, "Mines payout")
+        state = finish_mines_round(state, "cashout", payout, selected=tile)
+        outcome = "cashout"
+    set_state(f"mines:{g.user['id']}", state)
+    get_db().commit()
+    return jsonify({"state": mines_public(state), "balance": get_balance(g.user["id"]), "outcome": outcome})
+
+
+@app.route("/api/mines/random", methods=["POST"])
+@login_required
+def api_mines_random():
+    state = mines_state(g.user["id"])
+    if not state.get("active"):
+        return jsonify({"error": "Start a Mines round first."}), 400
+    unopened = [tile for tile in range(MINES_GRID_SIZE) if tile not in state.get("revealed", [])]
+    if not unopened:
+        return jsonify({"error": "No unopened tiles remain."}), 400
+    return reveal_mines_tile(secrets.choice(unopened))
+
+
+@app.route("/api/mines/cashout", methods=["POST"])
+@login_required
+def api_mines_cashout():
+    state = mines_state(g.user["id"])
+    if not state.get("active"):
+        return jsonify({"error": "No active Mines round."}), 400
+    payout = int(int(state["bet"]) * float(state.get("multiplier") or 1.0))
+    if payout > 0:
+        change_balance(g.user["id"], payout, "Mines payout")
+    state = finish_mines_round(state, "cashout", payout)
+    set_state(f"mines:{g.user['id']}", state)
+    get_db().commit()
+    return jsonify({"state": mines_public(state), "balance": get_balance(g.user["id"]), "outcome": "cashout"})
+
+
+def slot_weighted_symbol(rng):
+    total = sum(symbol["weight"] for symbol in SLOT_SYMBOLS)
+    pick = rng.uniform(0, total)
+    cursor = 0
+    for symbol in SLOT_SYMBOLS:
+        cursor += symbol["weight"]
+        if pick <= cursor:
+            return symbol
+    return SLOT_SYMBOLS[-1]
+
+
+def slot_spin_result(rng, bonus=False):
+    reels = [slot_weighted_symbol(rng) for _ in range(5)]
+    counts = {symbol["key"]: 0 for symbol in SLOT_SYMBOLS}
+    for symbol in reels:
+        counts[symbol["key"]] += 1
+    best_key, best_count = max(counts.items(), key=lambda item: item[1])
+    symbol = next(item for item in SLOT_SYMBOLS if item["key"] == best_key)
+    multiplier = 0
+    label = "No hit"
+    if best_count >= 5:
+        multiplier = symbol["pay"]
+        label = f"Five {symbol['label']}"
+    elif best_count == 4:
+        multiplier = max(2, round(symbol["pay"] * 0.2, 2))
+        label = f"Four {symbol['label']}"
+    elif best_count == 3:
+        multiplier = max(0.5, round(symbol["pay"] * 0.06, 2))
+        label = f"Three {symbol['label']}"
+    scatters = counts.get("star", 0)
+    free_spins = 10 if scatters >= 3 else 0
+    if bonus and multiplier:
+        multiplier = round(multiplier * 1.25, 2)
+    jackpot = best_key == "seven" and best_count == 5
+    return {
+        "reels": [{"key": symbol["key"], "label": symbol["label"]} for symbol in reels],
+        "multiplier": multiplier,
+        "label": "Jackpot" if jackpot else label,
+        "free_spins": free_spins,
+        "jackpot": jackpot,
+    }
+
+
+@app.route("/slots")
+@login_required
+def slots():
+    return render_template(
+        "slots.html",
+        symbols=SLOT_SYMBOLS,
+        bonus_spins=SLOT_BONUS_SPINS,
+        bonus_cost_multiplier=SLOT_BONUS_COST_MULTIPLIER,
+    )
+
+
+@app.route("/api/slots/spin", methods=["POST"])
+@login_required
+def api_slots_spin():
+    try:
+        bet = parse_positive_int(request.form.get("bet"), minimum=1, maximum=100_000)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    mode = request.form.get("mode", "base")
+    bonus = mode == "bonus"
+    spins = SLOT_BONUS_SPINS if bonus else 1
+    total_cost = bet * (SLOT_BONUS_COST_MULTIPLIER if bonus else 1)
+    error = debit_or_error(g.user["id"], total_cost, "Slots bet")
+    if error:
+        get_db().commit()
+        return jsonify({"error": error}), 400
+    ctx = begin_fair("slots", request.form.get("client_seed"))
+    results = []
+    payout = 0
+    awarded_free_spins = 0
+    jackpot = False
+    for index in range(spins):
+        spin_rng = fair_rng(ctx["pending"]["server_seed"], ctx["client_seed"], ctx["pending"]["nonce"], "slots", f"spin-{index}")
+        spin = slot_spin_result(spin_rng, bonus=bonus)
+        spin_payout = int(bet * float(spin["multiplier"]))
+        spin["payout"] = spin_payout
+        payout += spin_payout
+        awarded_free_spins += int(spin.get("free_spins") or 0)
+        jackpot = jackpot or bool(spin.get("jackpot"))
+        results.append(spin)
+    net = payout - total_cost
+    if payout > 0:
+        change_balance(g.user["id"], payout, "Slots payout")
+    fair = finish_fair(
+        "slots",
+        ctx["pending"],
+        ctx["client_seed"],
+        {
+            "player_name": g.user["username"],
+            "bet": total_cost,
+            "base_bet": bet,
+            "mode": mode,
+            "spins": spins,
+            "results": results,
+            "payout": payout,
+            "net": net,
+            "multiplier": round(payout / total_cost, 4) if total_cost else 0,
+            "jackpot": jackpot,
+        },
+    )
+    get_db().commit()
+    return jsonify(
+        {
+            "bet": total_cost,
+            "base_bet": bet,
+            "mode": mode,
+            "spins": spins,
+            "results": results,
+            "payout": payout,
+            "net": net,
+            "multiplier": round(payout / total_cost, 4) if total_cost else 0,
+            "free_spins": awarded_free_spins,
+            "jackpot": jackpot,
             "balance": get_balance(g.user["id"]),
             "fair": fair,
         }
@@ -1326,8 +2235,10 @@ def hilo_finish_round(state, outcome, payout, extra_result=None):
     bet = int(state.get("bet") or 0)
     result_json = {
         "outcome": outcome,
+        "player_name": g.user["username"],
         "bet": bet,
         "payout": payout,
+        "net": payout - bet,
         "multiplier": round(float(state.get("multiplier") or 1.0), 4),
         "current": card_label(state.get("current")),
         "history": [
@@ -1533,12 +2444,27 @@ def default_blackjack_state():
 
 
 def blackjack_state():
-    return get_state(BLACKJACK_TABLE_KEY, default_blackjack_state)
+    return get_state(table_key("blackjack"), default_blackjack_state)
 
 
 def reset_blackjack_for_betting(state):
     for player in state["players"].values():
-        player.update({"bet": 0, "client_seed": "", "hand": [], "status": "seated", "result": "", "payout": 0})
+        player.update(
+            {
+                "bet": 0,
+                "pair_bet": 0,
+                "plus3_bet": 0,
+                "side_payout": 0,
+                "side_results": [],
+                "client_seed": "",
+                "hand": [],
+                "split_hands": [],
+                "active_hand": 0,
+                "status": "seated",
+                "result": "",
+                "payout": 0,
+            }
+        )
     state.update(
         {
             "phase": "waiting",
@@ -1557,6 +2483,109 @@ def blackjack_seated_user(state, user_id):
     return state["players"].get(str(user_id))
 
 
+def blackjack_three_card_side(player_cards, dealer_upcard):
+    cards = player_cards[:2] + [dealer_upcard]
+    if len(cards) < 3 or not dealer_upcard:
+        return {"name": "No result", "odds": 0}
+    ranks = sorted([card_rank_value(card) for card in cards])
+    suits = {card["suit"] for card in cards}
+    same_rank = len({card["rank"] for card in cards}) == 1
+    flush = len(suits) == 1
+    straight = ranks == list(range(ranks[0], ranks[0] + 3)) or ranks == [2, 3, 14]
+    if same_rank and flush:
+        return {"name": "Suited trips", "odds": 100}
+    if straight and flush:
+        return {"name": "Straight flush", "odds": 40}
+    if same_rank:
+        return {"name": "Trips", "odds": 30}
+    if straight:
+        return {"name": "Straight", "odds": 10}
+    if flush:
+        return {"name": "Flush", "odds": 5}
+    return {"name": "No 21+3", "odds": 0}
+
+
+def blackjack_pair_side(player_cards):
+    if len(player_cards) < 2:
+        return {"name": "No pair", "odds": 0}
+    first, second = player_cards[:2]
+    if first["rank"] != second["rank"]:
+        return {"name": "No pair", "odds": 0}
+    if first["suit"] == second["suit"]:
+        return {"name": "Perfect pair", "odds": 25}
+    if (first["suit"] in {"H", "D"}) == (second["suit"] in {"H", "D"}):
+        return {"name": "Colored pair", "odds": 12}
+    return {"name": "Mixed pair", "odds": 6}
+
+
+def blackjack_apply_side_bets(player, dealer_upcard):
+    player["side_results"] = []
+    player["side_payout"] = 0
+    if int(player.get("pair_bet") or 0) > 0:
+        pair = blackjack_pair_side(player["hand"])
+        payout = int(player["pair_bet"]) * (pair["odds"] + 1) if pair["odds"] else 0
+        player["side_payout"] += payout
+        player["side_results"].append({"name": pair["name"], "bet": int(player["pair_bet"]), "payout": payout})
+    if int(player.get("plus3_bet") or 0) > 0:
+        plus3 = blackjack_three_card_side(player["hand"], dealer_upcard)
+        payout = int(player["plus3_bet"]) * (plus3["odds"] + 1) if plus3["odds"] else 0
+        player["side_payout"] += payout
+        player["side_results"].append({"name": plus3["name"], "bet": int(player["plus3_bet"]), "payout": payout})
+
+
+def blackjack_current_hand(player):
+    split_hands = player.get("split_hands") or []
+    if split_hands:
+        index = max(0, min(int(player.get("active_hand") or 0), len(split_hands) - 1))
+        return split_hands[index]
+    return {"cards": player.get("hand", []), "bet": int(player.get("bet") or 0), "status": player.get("status", "seated")}
+
+
+def blackjack_can_split(player):
+    cards = player.get("hand") or []
+    return not player.get("split_hands") and len(cards) == 2 and cards[0]["rank"] == cards[1]["rank"]
+
+
+def blackjack_advance_player_hand(player):
+    split_hands = player.get("split_hands") or []
+    if not split_hands:
+        return True
+    index = int(player.get("active_hand") or 0)
+    if index + 1 < len(split_hands):
+        player["active_hand"] = index + 1
+        return False
+    player["status"] = "stand"
+    return True
+
+
+def blackjack_settle_hand(cards, bet, dealer_total, dealer_blackjack):
+    total = blackjack_total(cards)
+    natural = total == 21 and len(cards) == 2
+    payout = 0
+    if total > 21:
+        result = "Bust"
+    elif dealer_blackjack and natural:
+        payout = bet
+        result = "Push"
+    elif dealer_blackjack:
+        result = "Dealer blackjack"
+    elif natural:
+        payout = bet + int(bet * 1.5)
+        result = "Blackjack"
+    elif dealer_total > 21:
+        payout = bet * 2
+        result = "Dealer bust"
+    elif total > dealer_total:
+        payout = bet * 2
+        result = "Win"
+    elif total == dealer_total:
+        payout = bet
+        result = "Push"
+    else:
+        result = "Lose"
+    return {"cards": cards, "total": total, "bet": bet, "result": result, "payout": payout}
+
+
 def blackjack_public(state, user_id):
     data = json.loads(json.dumps(state))
     if data["phase"] in {"playing", "dealer"} and data["dealer"]["hand"]:
@@ -1567,6 +2596,9 @@ def blackjack_public(state, user_id):
     for uid, player in data["players"].items():
         snapshot = safe_user_snapshot(int(uid))
         player["balance"] = snapshot["balance"]
+        player["can_split"] = blackjack_can_split(player) and snapshot["balance"] >= int(player.get("bet") or 0)
+        current_hand = blackjack_current_hand(player)
+        player["can_double"] = player.get("status") == "playing" and len(current_hand.get("cards", [])) == 2 and snapshot["balance"] >= int(current_hand.get("bet") or 0)
     data["me"] = str(user_id)
     data["my_balance"] = get_balance(user_id)
     data["current_turn"] = data["turn_order"][data["turn_index"]] if data["phase"] == "playing" and data["turn_order"] else None
@@ -1595,31 +2627,17 @@ def resolve_blackjack(state):
     for uid, player in state["players"].items():
         if player.get("bet", 0) <= 0:
             continue
-        bet = int(player["bet"])
-        total = blackjack_total(player["hand"])
-        natural = total == 21 and len(player["hand"]) == 2
-        payout = 0
-        if total > 21:
-            result = "Bust"
-        elif dealer_blackjack and natural:
-            payout = bet
-            result = "Push"
-        elif dealer_blackjack:
-            result = "Dealer blackjack"
-        elif natural:
-            payout = bet + int(bet * 1.5)
-            result = "Blackjack"
-        elif dealer_total > 21:
-            payout = bet * 2
-            result = "Dealer bust"
-        elif total > dealer_total:
-            payout = bet * 2
-            result = "Win"
-        elif total == dealer_total:
-            payout = bet
-            result = "Push"
+        hand_results = []
+        if player.get("split_hands"):
+            for hand in player["split_hands"]:
+                result = blackjack_settle_hand(hand.get("cards", []), int(hand.get("bet") or 0), dealer_total, dealer_blackjack)
+                hand.update({"status": "done", "result": result["result"], "payout": result["payout"]})
+                hand_results.append(result)
         else:
-            result = "Lose"
+            result = blackjack_settle_hand(player["hand"], int(player["bet"]), dealer_total, dealer_blackjack)
+            hand_results.append(result)
+        payout = sum(item["payout"] for item in hand_results) + int(player.get("side_payout") or 0)
+        result = " / ".join(item["result"] for item in hand_results)
         player["status"] = "done"
         player["result"] = result
         player["payout"] = payout
@@ -1631,10 +2649,21 @@ def resolve_blackjack(state):
         state["pending"],
         state.get("client_seed", "table"),
         {
+            "player_name": "Blackjack table",
+            "net": 0,
             "dealer": [card_label(card) for card in state["dealer"]["hand"]],
             "players": {
                 uid: {
                     "hand": [card_label(card) for card in player["hand"]],
+                    "split_hands": [
+                        {
+                            "cards": [card_label(card) for card in hand.get("cards", [])],
+                            "result": hand.get("result", ""),
+                            "payout": hand.get("payout", 0),
+                        }
+                        for hand in player.get("split_hands", [])
+                    ],
+                    "side_results": player.get("side_results", []),
                     "result": player.get("result", ""),
                     "payout": player.get("payout", 0),
                 }
@@ -1649,7 +2678,8 @@ def resolve_blackjack(state):
 @app.route("/blackjack")
 @login_required
 def blackjack():
-    return render_template("blackjack.html")
+    selected_table = table_number() if "table" in request.args else None
+    return render_template("blackjack.html", table_number=selected_table, tables=table_summaries("blackjack"))
 
 
 @app.route("/api/blackjack/state")
@@ -1671,14 +2701,20 @@ def api_blackjack_join():
             "username": g.user["username"],
             "seat": seat,
             "bet": 0,
+            "pair_bet": 0,
+            "plus3_bet": 0,
+            "side_payout": 0,
+            "side_results": [],
             "client_seed": "",
             "hand": [],
+            "split_hands": [],
+            "active_hand": 0,
             "status": "seated",
             "result": "",
             "payout": 0,
         }
         state["log"].append(f"{g.user['username']} sat in seat {seat}.")
-    set_state(BLACKJACK_TABLE_KEY, state)
+    set_state(table_key("blackjack"), state)
     get_db().commit()
     return jsonify(blackjack_public(state, g.user["id"]))
 
@@ -1692,7 +2728,7 @@ def api_blackjack_leave():
     state["players"].pop(str(g.user["id"]), None)
     if not state["players"]:
         state = default_blackjack_state()
-    set_state(BLACKJACK_TABLE_KEY, state)
+    set_state(table_key("blackjack"), state)
     get_db().commit()
     return jsonify(blackjack_public(state, g.user["id"]))
 
@@ -1710,14 +2746,32 @@ def api_blackjack_bet():
         return jsonify({"error": "Join the blackjack table first."}), 400
     try:
         bet = parse_positive_int(request.form.get("bet"), minimum=1, maximum=100_000)
+        pair_bet = parse_positive_int(request.form.get("pair_bet") or 0, minimum=0, maximum=100_000)
+        plus3_bet = parse_positive_int(request.form.get("plus3_bet") or 0, minimum=0, maximum=100_000)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    if get_balance(g.user["id"]) < bet:
+    total_bet = bet + pair_bet + plus3_bet
+    if get_balance(g.user["id"]) < total_bet:
         return jsonify({"error": "Not enough fake chips for that bet."}), 400
-    player.update({"bet": bet, "client_seed": request.form.get("client_seed", "").strip(), "status": "ready", "hand": [], "result": "", "payout": 0})
+    player.update(
+        {
+            "bet": bet,
+            "pair_bet": pair_bet,
+            "plus3_bet": plus3_bet,
+            "side_payout": 0,
+            "side_results": [],
+            "client_seed": request.form.get("client_seed", "").strip(),
+            "status": "ready",
+            "hand": [],
+            "split_hands": [],
+            "active_hand": 0,
+            "result": "",
+            "payout": 0,
+        }
+    )
     state["phase"] = "betting"
-    state["log"].append(f"{g.user['username']} placed {format_chips(bet)}.")
-    set_state(BLACKJACK_TABLE_KEY, state)
+    state["log"].append(f"{g.user['username']} placed {format_chips(total_bet)}.")
+    set_state(table_key("blackjack"), state)
     get_db().commit()
     return jsonify(blackjack_public(state, g.user["id"]))
 
@@ -1734,25 +2788,36 @@ def api_blackjack_start():
     if not active:
         return jsonify({"error": "At least one seated player needs a bet."}), 400
     for uid, player in active:
-        if get_balance(int(uid)) < int(player["bet"]):
+        total_bet = int(player["bet"]) + int(player.get("pair_bet") or 0) + int(player.get("plus3_bet") or 0)
+        if get_balance(int(uid)) < total_bet:
             return jsonify({"error": f"{player['username']} no longer has enough chips."}), 400
-    client_seed = "|".join(f"{uid}:{player.get('client_seed') or player['username']}:{player['bet']}" for uid, player in sorted(active))
+    client_seed = "|".join(
+        f"{uid}:{player.get('client_seed') or player['username']}:{player['bet']}:{player.get('pair_bet', 0)}:{player.get('plus3_bet', 0)}"
+        for uid, player in sorted(active)
+    )
     rng = fair_rng(state["pending"]["server_seed"], client_seed, state["pending"]["nonce"], "blackjack")
     state["client_seed"] = client_seed
     state["deck"] = new_deck(rng)
     state["dealer"] = {"hand": []}
     state["round"] += 1
     for uid, player in active:
-        change_balance(int(uid), -int(player["bet"]), "Blackjack bet")
+        total_bet = int(player["bet"]) + int(player.get("pair_bet") or 0) + int(player.get("plus3_bet") or 0)
+        change_balance(int(uid), -total_bet, "Blackjack bet")
         player["hand"] = []
+        player["split_hands"] = []
+        player["active_hand"] = 0
         player["status"] = "playing"
         player["result"] = ""
         player["payout"] = 0
+        player["side_payout"] = 0
+        player["side_results"] = []
     ordered = [uid for uid, player in sorted(active, key=lambda item: item[1]["seat"])]
     for _ in range(2):
         for uid in ordered:
             state["players"][uid]["hand"].append(state["deck"].pop())
         state["dealer"]["hand"].append(state["deck"].pop())
+    for uid in ordered:
+        blackjack_apply_side_bets(state["players"][uid], state["dealer"]["hand"][0])
     for uid in ordered:
         if blackjack_total(state["players"][uid]["hand"]) == 21:
             state["players"][uid]["status"] = "stand"
@@ -1764,7 +2829,7 @@ def api_blackjack_start():
         resolve_blackjack(state)
     else:
         next_blackjack_turn(state)
-    set_state(BLACKJACK_TABLE_KEY, state)
+    set_state(table_key("blackjack"), state)
     get_db().commit()
     return jsonify(blackjack_public(state, g.user["id"]))
 
@@ -1780,22 +2845,74 @@ def api_blackjack_action():
         return jsonify({"error": "It is not your turn."}), 400
     action = request.form.get("action")
     player = state["players"][current_uid]
+    current = blackjack_current_hand(player)
+    cards = current.get("cards", [])
+    hand_bet = int(current.get("bet") or player.get("bet") or 0)
     if action == "hit":
-        player["hand"].append(state["deck"].pop())
-        total = blackjack_total(player["hand"])
+        cards.append(state["deck"].pop())
+        total = blackjack_total(cards)
         if total > 21:
-            player["status"] = "bust"
-            state["turn_index"] += 1
+            if player.get("split_hands"):
+                current["status"] = "bust"
+            else:
+                player["status"] = "bust"
+            if blackjack_advance_player_hand(player):
+                state["turn_index"] += 1
         elif total == 21:
-            player["status"] = "stand"
-            state["turn_index"] += 1
+            if player.get("split_hands"):
+                current["status"] = "stand"
+            else:
+                player["status"] = "stand"
+            if blackjack_advance_player_hand(player):
+                state["turn_index"] += 1
     elif action == "stand":
-        player["status"] = "stand"
-        state["turn_index"] += 1
+        if player.get("split_hands"):
+            current["status"] = "stand"
+        else:
+            player["status"] = "stand"
+        if blackjack_advance_player_hand(player):
+            state["turn_index"] += 1
+    elif action == "double":
+        if len(cards) != 2:
+            return jsonify({"error": "Double is only available on the first two cards of a hand."}), 400
+        if get_balance(g.user["id"]) < hand_bet:
+            return jsonify({"error": "Not enough fake chips to double."}), 400
+        change_balance(g.user["id"], -hand_bet, "Blackjack bet")
+        if player.get("split_hands"):
+            current["bet"] = hand_bet * 2
+        else:
+            player["bet"] = int(player["bet"]) + hand_bet
+        cards.append(state["deck"].pop())
+        if blackjack_total(cards) > 21:
+            if player.get("split_hands"):
+                current["status"] = "bust"
+            else:
+                player["status"] = "bust"
+        else:
+            if player.get("split_hands"):
+                current["status"] = "stand"
+            else:
+                player["status"] = "stand"
+        if blackjack_advance_player_hand(player):
+            state["turn_index"] += 1
+    elif action == "split":
+        if not blackjack_can_split(player):
+            return jsonify({"error": "Split is only available when your first two cards have the same rank."}), 400
+        if get_balance(g.user["id"]) < int(player["bet"]):
+            return jsonify({"error": "Not enough fake chips to split."}), 400
+        change_balance(g.user["id"], -int(player["bet"]), "Blackjack bet")
+        first, second = player["hand"]
+        player["split_hands"] = [
+            {"cards": [first, state["deck"].pop()], "bet": int(player["bet"]), "status": "playing", "result": "", "payout": 0},
+            {"cards": [second, state["deck"].pop()], "bet": int(player["bet"]), "status": "playing", "result": "", "payout": 0},
+        ]
+        player["active_hand"] = 0
+        player["status"] = "playing"
+        player["bet"] = int(player["bet"]) * 2
     else:
         return jsonify({"error": "Unknown blackjack action."}), 400
     next_blackjack_turn(state)
-    set_state(BLACKJACK_TABLE_KEY, state)
+    set_state(table_key("blackjack"), state)
     get_db().commit()
     return jsonify(blackjack_public(state, g.user["id"]))
 
@@ -1819,7 +2936,7 @@ def default_holdem_state():
 
 
 def holdem_state():
-    return get_state(HOLDEM_TABLE_KEY, default_holdem_state)
+    return get_state(table_key("holdem"), default_holdem_state)
 
 
 def holdem_order(state):
@@ -1893,6 +3010,8 @@ def holdem_finish_by_fold(state):
         state["pending"],
         state.get("client_seed", "table"),
         {
+            "player_name": state["players"][winner]["username"],
+            "net": payout,
             "winner": state["players"][winner]["username"],
             "pot": state["pot"],
             "community": [card_label(card) for card in state["community"]],
@@ -1928,6 +3047,8 @@ def holdem_showdown(state):
         state["pending"],
         state.get("client_seed", "table"),
         {
+            "player_name": ", ".join(state["players"][uid]["username"] for uid in winners),
+            "net": state["pot"],
             "winners": [state["players"][uid]["username"] for uid in winners],
             "pot": state["pot"],
             "community": [card_label(card) for card in state["community"]],
@@ -1991,7 +3112,8 @@ def holdem_next_turn(state, current_uid):
 @app.route("/texas-holdem")
 @login_required
 def holdem():
-    return render_template("holdem.html")
+    selected_table = table_number() if "table" in request.args else None
+    return render_template("holdem.html", table_number=selected_table, tables=table_summaries("holdem"))
 
 
 @app.route("/api/holdem/state")
@@ -2020,7 +3142,7 @@ def api_holdem_join():
             "result": "",
         }
         state["log"].append(f"{g.user['username']} joined seat {seat}.")
-    set_state(HOLDEM_TABLE_KEY, state)
+    set_state(table_key("holdem"), state)
     get_db().commit()
     return jsonify(holdem_public(state, g.user["id"]))
 
@@ -2034,7 +3156,7 @@ def api_holdem_leave():
     state["players"].pop(str(g.user["id"]), None)
     if not state["players"]:
         state = default_holdem_state()
-    set_state(HOLDEM_TABLE_KEY, state)
+    set_state(table_key("holdem"), state)
     get_db().commit()
     return jsonify(holdem_public(state, g.user["id"]))
 
@@ -2052,7 +3174,7 @@ def api_holdem_seed():
         return jsonify({"error": "Join the poker table first."}), 400
     player["client_seed"] = request.form.get("client_seed", "").strip()
     state["log"].append(f"{g.user['username']} updated a client seed.")
-    set_state(HOLDEM_TABLE_KEY, state)
+    set_state(table_key("holdem"), state)
     get_db().commit()
     return jsonify(holdem_public(state, g.user["id"]))
 
@@ -2106,7 +3228,7 @@ def api_holdem_start():
     state["turn_user"] = next_uid_after(state, state["players"][big_blind_uid]["seat"], capable)
     state["fair"] = None
     state["log"].append(f"Hold'em hand {state['round']} started.")
-    set_state(HOLDEM_TABLE_KEY, state)
+    set_state(table_key("holdem"), state)
     get_db().commit()
     return jsonify(holdem_public(state, g.user["id"]))
 
@@ -2161,7 +3283,7 @@ def api_holdem_action():
     else:
         return jsonify({"error": "Unknown poker action."}), 400
     holdem_next_turn(state, uid)
-    set_state(HOLDEM_TABLE_KEY, state)
+    set_state(table_key("holdem"), state)
     get_db().commit()
     return jsonify(holdem_public(state, g.user["id"]))
 

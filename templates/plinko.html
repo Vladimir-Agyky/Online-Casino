@@ -42,7 +42,7 @@
 
         <div data-plinko-result>
             {% if result %}
-                <div class="result-banner {{ 'win' if result.net > 0 else ('push' if result.net == 0 else 'lose') }}">
+                <div class="result-banner {{ 'win' if result.net > 0 else ('push' if result.net == 0 else 'lose') }}" data-toast-result data-toast-multiplier="{{ result.multiplier }}" data-toast-net="{{ result.net }}">
                     <strong>{{ format_multiplier(result.multiplier) }}x landed</strong>
                     <span>{{ '%+d'|format(result.net) }} chips</span>
                 </div>
@@ -73,6 +73,14 @@
             </div>
             <button class="button primary" type="submit">Drop ball</button>
         </form>
+        <div class="auto-panel">
+            <div class="section-kicker">Auto</div>
+            <label>
+                Drops
+                <input type="number" min="1" max="100" value="5" data-plinko-auto-count>
+            </label>
+            <button class="button ghost" type="button" data-plinko-auto>Auto Drop</button>
+        </div>
     </aside>
 </section>
 {% endblock %}

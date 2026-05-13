@@ -16,6 +16,18 @@
     </div>
 </section>
 
+{% if raindrops %}
+<section class="raindrop-strip">
+    {% for event in raindrops %}
+        <div>
+            <span>Raindrop</span>
+            <strong>{{ event.creator_name }} / {{ format_chips(event.amount) }} chips</strong>
+            <a class="button primary small" href="{{ url_for('raindrops') }}">Join</a>
+        </div>
+    {% endfor %}
+</section>
+{% endif %}
+
 <section class="game-grid">
     {% for name, endpoint, text in games %}
         <a class="game-tile" href="{{ url_for(endpoint) }}">
@@ -34,10 +46,22 @@
         </div>
         <div class="compact-table">
             {% for round in recent %}
-                <div>
+                {% set data = round.result_json|json_loads %}
+                <div class="{{ 'mega-round' if data.multiplier is defined and data.multiplier >= 100 else '' }}">
                     <span>{{ round.game.replace('_', ' ').title() }}</span>
-                    <code>{{ round.server_seed_hash[:18] }}...</code>
-                    <small>{{ round.created_at }}</small>
+                    <code>
+                        {{ data.player_name if data.player_name else round.server_seed_hash[:18] ~ '...' }}
+                    </code>
+                    <small>
+                        {% if data.net is defined %}
+                            {{ '%+d'|format(data.net) }} chips
+                            {% if data.multiplier is defined %}
+                                / {{ '%.4g'|format(data.multiplier) }}x
+                            {% endif %}
+                        {% else %}
+                            {{ round.created_at }}
+                        {% endif %}
+                    </small>
                 </div>
             {% else %}
                 <div class="empty-row">No rounds yet.</div>

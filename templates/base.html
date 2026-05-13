@@ -17,6 +17,7 @@
             {% if current_user %}
                 <a href="{{ url_for('lobby') }}">Lobby</a>
                 <a href="{{ url_for('fairness') }}">Fair Play</a>
+                <a href="{{ url_for('raindrops') }}">Raindrop</a>
                 {% if current_user.role == 'admin' %}
                     <a href="{{ url_for('admin') }}">Admin</a>
                 {% endif %}
@@ -89,6 +90,30 @@
             </section>
         </div>
     {% endif %}
+
+    {% if current_user %}
+        <aside class="chat-window" data-chat-window>
+            <div class="chat-head">
+                <div>
+                    <div class="section-kicker">Global</div>
+                    <strong>Chat</strong>
+                </div>
+                <button class="button ghost small" type="button" data-chat-toggle>Hide</button>
+            </div>
+            <div class="chat-messages" data-chat-messages></div>
+            <form class="rain-form" data-rain-form>
+                <input name="amount" type="number" min="1" placeholder="Rain amount">
+                <input name="count" type="number" min="1" max="25" value="3" aria-label="Receivers">
+                <button class="button secondary small" type="submit">Rain</button>
+            </form>
+            <form class="chat-form" data-chat-form>
+                <input name="message" autocomplete="off" maxlength="240" placeholder="Message">
+                <button class="button primary small" type="submit">Send</button>
+            </form>
+        </aside>
+    {% endif %}
+
+    <div class="toast-stack" data-toast-stack></div>
 
     <script src="{{ url_for('static', filename='casino.js') }}"></script>
     {% block scripts %}{% endblock %}

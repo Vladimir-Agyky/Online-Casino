@@ -11,8 +11,19 @@
         </div>
         <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
     </div>
-    <div id="blackjackApp" class="online-table">
-        <div class="loading-dot">Loading table</div>
+    <div class="table-card-grid">
+        {% for table in tables %}
+            <div class="table-card {{ 'active' if table.number == table_number else '' }}">
+                <strong>Blackjack {{ table.number }}</strong>
+                <span>{{ table.players }}/{{ table.capacity }} players</span>
+                <a class="button primary small" href="{{ url_for('blackjack', table=table.number) }}">Join</a>
+            </div>
+        {% endfor %}
     </div>
+    {% if table_number %}
+        <div id="blackjackApp" class="online-table">
+            <div class="loading-dot">Loading table</div>
+        </div>
+    {% endif %}
 </section>
 {% endblock %}

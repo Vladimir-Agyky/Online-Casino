@@ -1,44 +1,75 @@
 {% extends "base.html" %}
-{% from "macros.html" import playing_card, fair_box %}
 
 {% block title %}Dragon Tiger - Nova Felt Casino{% endblock %}
 
 {% block content %}
-<section class="game-page dragon-stage">
+{% if not table_number %}
+<section class="online-shell table-select-shell">
+    <div class="online-head">
+        <div>
+            <div class="section-kicker">Dragon Tiger</div>
+            <h1>Select table</h1>
+        </div>
+        <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
+    </div>
+    <div class="table-card-grid live-table-cards">
+        {% for table in tables %}
+            <div class="table-card">
+                <strong>Dragon Tiger {{ table.number }}</strong>
+                <div class="mini-shoe">
+                    {% for item in table.shoe %}
+                        <i class="{{ item.winner }}">{{ item.winner[0]|upper }}</i>
+                    {% else %}
+                        <em>No shoe yet</em>
+                    {% endfor %}
+                </div>
+                <a class="button primary small" href="{{ url_for('dragon_tiger', table=table.number) }}">Join</a>
+            </div>
+        {% endfor %}
+    </div>
+</section>
+{% else %}
+<section class="game-page dragon-stage" data-live-table="dragon_tiger" data-live-table-number="{{ table_number }}">
     <div class="game-board">
         <div class="table-header">
             <div>
-                <div class="section-kicker">Dragon Tiger</div>
+                <div class="section-kicker">Dragon Tiger {{ table_number }}</div>
                 <h1>Single card duel</h1>
             </div>
-            <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
+            <a class="button ghost small" href="{{ url_for('dragon_tiger') }}">Tables</a>
         </div>
 
-        {% if result %}
-            <div class="result-banner result-reveal-pending {{ 'win' if result.net > 0 else ('push' if result.net == 0 else 'lose') }}">
-                <strong>{{ result.winner.title() }}</strong>
-                <span>{{ '%+d'|format(result.net) }} chips</span>
-            </div>
-            <div class="duel-cards">
+        <div class="live-table-stage">
+            <div class="live-round-head">
                 <div>
-                    <h2>Dragon</h2>
-                    {{ playing_card(result.dragon, order=0) }}
+                    <span>Next round</span>
+                    <strong data-live-status>Waiting</strong>
                 </div>
-                <div class="versus">VS</div>
+                <div class="countdown-ring" data-live-countdown style="--progress: 1"><span>10</span></div>
+            </div>
+            <div class="live-card-table" data-live-cards>
+                <div class="loading-dot">Connecting to live shoe</div>
+            </div>
+            <div data-live-result></div>
+        </div>
+
+        <div class="road-panel" data-live-road>
+            <div class="road-head">
                 <div>
-                    <h2>Tiger</h2>
-                    {{ playing_card(result.tiger, order=1) }}
+                    <div class="section-kicker">Roads</div>
+                    <h2>Live shoe</h2>
                 </div>
             </div>
-            {{ fair_box(result.fair) }}
-        {% endif %}
+            <div class="road-grid" data-road-grid></div>
+        </div>
     </div>
 
     <aside class="bet-panel">
-        <form method="post" class="stacked-form">
+        <form method="post" class="stacked-form" data-live-bet-form>
+            <input type="hidden" name="table" value="{{ table_number }}">
             <label>
                 Bet
-                <input type="number" name="bet" min="1" value="{{ result.bet if result else 100 }}" required>
+                <input type="number" name="bet" min="1" value="100" required>
             </label>
             <label>
                 Client seed
@@ -49,8 +80,10 @@
                 <label><input type="radio" name="wager" value="tiger"><span>Tiger</span></label>
                 <label><input type="radio" name="wager" value="tie"><span>Tie</span></label>
             </div>
-            <button class="button primary" type="submit">Reveal</button>
+            <button class="button primary" type="submit">Lock Bet</button>
+            <div class="muted-line" data-live-bet-state>No bet locked.</div>
         </form>
     </aside>
 </section>
+{% endif %}
 {% endblock %}

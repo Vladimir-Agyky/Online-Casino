@@ -35,7 +35,7 @@
         </div>
 
         {% if result %}
-            <div class="result-banner {{ 'win' if result.win else 'lose' }}">
+            <div class="result-banner {{ 'win' if result.win else 'lose' }}" data-toast-result data-toast-multiplier="{{ result.payout / result.bet if result.bet else 0 }}" data-toast-net="{{ result.net }}">
                 <strong>{{ result.color.title() }} {{ result.number }}</strong>
                 <span>{{ '%+d'|format(result.net) }} chips</span>
             </div>

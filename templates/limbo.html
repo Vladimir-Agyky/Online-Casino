@@ -14,22 +14,24 @@
             <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
         </div>
 
-        <div class="limbo-meter {{ 'win' if result and result.win else 'lose' if result else '' }}">
+        <div class="limbo-meter {{ 'win' if result and result.win else 'lose' if result else '' }}" data-limbo-meter>
             <div class="limbo-line"></div>
-            <strong>{{ '%.2f'|format(result.crash) ~ 'x' if result else '1.00x' }}</strong>
+            <strong data-limbo-crash>{{ '%.2f'|format(result.crash) ~ 'x' if result else '1.00x' }}</strong>
         </div>
 
-        {% if result %}
-            <div class="result-banner {{ 'win' if result.win else 'lose' }}">
-                <strong>{{ 'Hit' if result.win else 'Crash' }} at {{ '%.2f'|format(result.crash) }}x</strong>
-                <span>{{ '%+d'|format(result.net) }} chips</span>
-            </div>
-            {{ fair_box(result.fair) }}
-        {% endif %}
+        <div data-limbo-result>
+            {% if result %}
+                <div class="result-banner {{ 'win' if result.win else 'lose' }}" data-toast-result data-toast-multiplier="{{ result.target if result.win else result.crash }}" data-toast-net="{{ result.net }}">
+                    <strong>{{ 'Hit' if result.win else 'Crash' }} at {{ '%.2f'|format(result.crash) }}x</strong>
+                    <span>{{ '%+d'|format(result.net) }} chips</span>
+                </div>
+                {{ fair_box(result.fair) }}
+            {% endif %}
+        </div>
     </div>
 
     <aside class="bet-panel">
-        <form method="post" class="stacked-form">
+        <form method="post" class="stacked-form" data-limbo-form>
             <label>
                 Bet
                 <input type="number" name="bet" min="1" value="{{ result.bet if result else 100 }}" required>
@@ -44,6 +46,14 @@
             </label>
             <button class="button primary" type="submit">Launch</button>
         </form>
+        <div class="auto-panel">
+            <div class="section-kicker">Auto</div>
+            <label>
+                Bets
+                <input type="number" min="1" max="100" value="5" data-limbo-auto-count>
+            </label>
+            <button class="button ghost" type="button" data-limbo-auto>Auto Bet</button>
+        </div>
     </aside>
 </section>
 {% endblock %}

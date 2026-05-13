@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% from "macros.html" import fair_box %}
+
+{% block title %}Mines - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="game-page mines-stage" data-game="mines">
+    <div class="game-board">
+        <div class="table-header">
+            <div>
+                <div class="section-kicker">Mines</div>
+                <h1>Gems and bombs</h1>
+            </div>
+            <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
+        </div>
+
+        <div class="mines-status" data-mines-status>
+            <div><span>Multiplier</span><strong>{{ '%.4g'|format(state.multiplier) }}x</strong></div>
+            <div><span>Cashout</span><strong>{{ format_chips(state.cashout) }}</strong></div>
+            <div>
+                <span>Next Tile</span>
+                <strong>
+                    {% if state.next_multiplier %}
+                        {{ '%.4g'|format(state.next_multiplier) }}x / {{ format_chips(state.bet * state.next_multiplier) }}
+                    {% else %}
+                        -
+                    {% endif %}
+                </strong>
+            </div>
+        </div>
+
+        <div class="mines-grid" data-mines-grid>
+            {% for tile in range(25) %}
+                {% set is_gem = tile in state.revealed %}
+                {% set is_mine = tile in state.mines %}
+                <button
+                    type="button"
+                    data-tile="{{ tile }}"
+                    class="{{ 'gem open' if is_gem else 'mine open' if is_mine else '' }}"
+                    {% if not state.active %}disabled{% endif %}
+                >
+                    <span>{{ 'G' if is_gem else 'M' if is_mine else '' }}</span>
+                </button>
+            {% endfor %}
+        </div>
+
+        <div data-mines-result>
+            {% if state.last %}
+                <div class="result-banner {{ 'win' if state.last.net > 0 else 'lose' }}" data-toast-result data-toast-multiplier="{{ state.last.multiplier }}" data-toast-net="{{ state.last.net }}">
+                    <strong>{{ state.last.outcome.title() }} at {{ '%.4g'|format(state.last.multiplier) }}x</strong>
+                    <span>{{ '%+d'|format(state.last.net) }} chips</span>
+                </div>
+                {{ fair_box(state.last.fair) }}
+            {% endif %}
+        </div>
+    </div>
+
+    <aside class="bet-panel">
+        <form class="stacked-form" data-mines-start>
+            <label>
+                Bet
+                <input type="number" name="bet" min="1" value="{{ state.bet if state.bet else 100 }}" required>
+            </label>
+            <label>
+                Mines
+                <input type="range" name="mines" min="1" max="24" value="{{ state.mine_count }}" data-mines-count>
+                <span class="range-value"><strong data-mines-count-label>{{ state.mine_count }}</strong> mines</span>
+            </label>
+            <label>
+                Client seed
+                <input name="client_seed" value="{{ current_user.username }}-mines">
+            </label>
+            <button class="button primary" type="submit">Bet</button>
+        </form>
+
+        <div class="stacked-form tight mines-active-controls" data-mines-controls>
+            <button class="button primary" type="button" data-mines-cashout {% if not state.active %}disabled{% endif %}>
+                Cash Out
+            </button>
+            <button class="button secondary" type="button" data-mines-random {% if not state.active %}disabled{% endif %}>
+                Pick Random Tile
+            </button>
+        </div>
+
+        <div class="auto-panel">
+            <div class="section-kicker">Auto</div>
+            <label>
+                Picks
+                <input type="number" min="1" max="24" value="3" data-mines-auto-picks>
+            </label>
+            <button class="button ghost" type="button" data-mines-auto>Auto Random</button>
+        </div>
+    </aside>
+</section>
+{% endblock %}

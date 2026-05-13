@@ -39,7 +39,7 @@
 
         {% if state.last and state.last.outcome %}
             {% set net = state.last.net or 0 %}
-            <div class="result-banner result-reveal-pending {{ 'win' if net > 0 else ('push' if net == 0 else 'lose') }}">
+            <div class="result-banner result-reveal-pending {{ 'win' if net > 0 else ('push' if net == 0 else 'lose') }}" data-toast-result data-toast-multiplier="{{ state.last.multiplier }}" data-toast-net="{{ net }}">
                 <strong>{{ state.last.outcome.title() }}</strong>
                 <span>{{ '%+d'|format(net) }} chips</span>
             </div>

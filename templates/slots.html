@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block title %}Slots - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="game-page slots-stage" data-game="slots">
+    <div class="game-board">
+        <div class="table-header">
+            <div>
+                <div class="section-kicker">Slots</div>
+                <h1>Feature reels</h1>
+            </div>
+            <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
+        </div>
+
+        <div class="slot-machine" data-slot-machine>
+            <div class="slot-jackpot">Jackpot 120x</div>
+            <div class="slot-reels" data-slot-reels>
+                {% for _ in range(5) %}
+                    <div class="slot-reel"><span>7</span></div>
+                {% endfor %}
+            </div>
+            <div class="slot-feature-row">
+                {% for symbol in symbols %}
+                    <span class="slot-symbol {{ symbol.key }}">{{ symbol.label }}</span>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div data-slot-result></div>
+    </div>
+
+    <aside class="bet-panel">
+        <form class="stacked-form" data-slot-form>
+            <label>
+                Bet
+                <input type="number" name="bet" min="1" value="100" required>
+            </label>
+            <label>
+                Client seed
+                <input name="client_seed" value="{{ current_user.username }}-slots">
+            </label>
+            <button class="button primary" type="submit" name="mode" value="base">Spin</button>
+            <button class="button secondary" type="button" data-slot-bonus>
+                Buy Free Spins +{{ bonus_spins }} ({{ bonus_cost_multiplier }}x)
+            </button>
+        </form>
+        <div class="auto-panel">
+            <div class="section-kicker">Auto</div>
+            <label>
+                Spins
+                <input type="number" min="1" max="100" value="10" data-slot-auto-count>
+            </label>
+            <button class="button ghost" type="button" data-slot-auto>Auto Spin</button>
+        </div>
+    </aside>
+</section>
+{% endblock %}
