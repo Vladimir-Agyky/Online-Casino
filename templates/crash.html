@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}Crash - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="game-page crash-stage" data-game="crash">
+    <div class="game-board">
+        <div class="table-header">
+            <div>
+                <div class="section-kicker">Crash</div>
+                <h1>Cash Out Before the Crash</h1>
+            </div>
+            <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
+        </div>
+
+        <div class="crash-history" data-crash-history></div>
+        <div class="crash-screen" data-crash-screen>
+            <canvas data-crash-canvas width="900" height="420"></canvas>
+            <strong data-crash-multiplier>1.00x</strong>
+            <span data-crash-status>Betting Opens</span>
+            <em data-crash-bust>Crashed</em>
+        </div>
+        <div data-crash-result></div>
+    </div>
+
+    <aside class="bet-panel">
+        <form class="stacked-form" data-crash-form>
+            <label>
+                Bet
+                <input type="number" name="bet" min="1" value="100" required>
+            </label>
+            <label>
+                Client Seed
+                <input name="client_seed" value="{{ current_user.username }}-crash">
+            </label>
+            <button class="button primary" type="submit" data-crash-bet>Place Bet</button>
+            <button class="button secondary" type="button" data-crash-cashout disabled>Cash Out</button>
+            <div class="muted-line" data-crash-bet-state>No active bet.</div>
+        </form>
+        <div class="auto-panel crash-auto-panel">
+            <div class="section-kicker">Auto</div>
+            <label>
+                Auto Bet Amount
+                <input type="number" min="1" value="100" data-crash-auto-amount>
+            </label>
+            <label>
+                Auto Cash Out
+                <input type="number" min="1.01" step="0.01" value="2" data-crash-auto-target>
+            </label>
+            <label>
+                Rounds
+                <input type="number" min="1" max="100" value="5" data-crash-auto-rounds>
+            </label>
+            <button class="button ghost" type="button" data-crash-auto>Auto Bet</button>
+            <div class="muted-line" data-crash-auto-state>Auto stopped.</div>
+        </div>
+    </aside>
+</section>
+{% endblock %}

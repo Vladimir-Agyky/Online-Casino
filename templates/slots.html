@@ -8,7 +8,7 @@
         <div class="table-header">
             <div>
                 <div class="section-kicker">Slots</div>
-                <h1>Feature reels</h1>
+                <h1>Feature Reels</h1>
             </div>
             <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
         </div>
@@ -37,7 +37,7 @@
                 <input type="number" name="bet" min="1" value="100" required>
             </label>
             <label>
-                Client seed
+                Client Seed
                 <input name="client_seed" value="{{ current_user.username }}-slots">
             </label>
             <button class="button primary" type="submit" name="mode" value="base">Spin</button>

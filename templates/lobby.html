@@ -5,9 +5,9 @@
 {% block content %}
 <section class="lobby-hero">
     <div>
-        <div class="section-kicker">Simulated chips only</div>
+        <div class="section-kicker">Play Chips Only</div>
         <h1>Nova Felt</h1>
-        <p>Seeded tables, shared rooms, quick rounds, and an admin desk for account control.</p>
+        <p>Live-style tables, provably fair rounds, and play-chip action.</p>
     </div>
     <div class="hero-table">
         <div class="hero-card ace">A</div>
@@ -20,7 +20,7 @@
 <section class="raindrop-strip">
     {% for event in raindrops %}
         <div>
-            <span>Raindrop</span>
+            <span>Rain</span>
             <strong>{{ event.creator_name }} / {{ format_chips(event.amount) }} chips</strong>
             <a class="button primary small" href="{{ url_for('raindrops') }}">Join</a>
         </div>
@@ -41,13 +41,13 @@
 <section class="panel-row">
     <div class="panel">
         <div class="panel-heading">
-            <h2>Recent fair rounds</h2>
-            <a href="{{ url_for('fairness') }}">View all</a>
+            <h2>Recent Results</h2>
+            <a href="{{ url_for('fairness') }}">View All</a>
         </div>
         <div class="compact-table">
             {% for round in recent %}
                 {% set data = round.result_json|json_loads %}
-                <div class="{{ 'mega-round' if data.multiplier is defined and data.multiplier >= 100 else '' }}">
+                <div class="{{ 'mega-round' if data.multiplier is defined and data.multiplier >= 10 else '' }}">
                     <span>{{ round.game.replace('_', ' ').title() }}</span>
                     <code>
                         {{ data.player_name if data.player_name else round.server_seed_hash[:18] ~ '...' }}
@@ -69,11 +69,11 @@
         </div>
     </div>
     <div class="panel account-panel">
-        <h2>Bankroll</h2>
+        <h2>Balance</h2>
         <div class="big-balance">{{ format_chips(current_user.balance) }}</div>
-        <p class="muted-line">Fake chips available.</p>
+        <p class="muted-line">Play chips available.</p>
         {% if current_user.role == 'admin' %}
-            <a class="button secondary" href="{{ url_for('admin') }}">Open admin desk</a>
+            <a class="button secondary" href="{{ url_for('admin') }}">Open Admin</a>
         {% endif %}
     </div>
 </section>

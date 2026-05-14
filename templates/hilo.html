@@ -9,7 +9,7 @@
         <div class="table-header">
             <div>
                 <div class="section-kicker">Hi-Lo</div>
-                <h1>Streak ladder</h1>
+                <h1>Higher or Lower</h1>
             </div>
             <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
         </div>
@@ -28,18 +28,18 @@
                 <span>Multiplier</span>
                 <strong>{{ '%.4g'|format(state.multiplier or 1) }}x</strong>
                 {% if state.active %}
-                    <small>Cashout {{ format_chips(state.cashout) }}</small>
+                    <small>Cash Out {{ format_chips(state.cashout) }}</small>
                 {% elif state.last and state.last.outcome %}
                     <small>{{ state.last.outcome.title() }}</small>
                 {% else %}
-                    <small>Press Play Game</small>
+                    <small>Start a round</small>
                 {% endif %}
             </div>
         </div>
 
         {% if state.last and state.last.outcome %}
             {% set net = state.last.net or 0 %}
-            <div class="result-banner result-reveal-pending {{ 'win' if net > 0 else ('push' if net == 0 else 'lose') }}" data-toast-result data-toast-multiplier="{{ state.last.multiplier }}" data-toast-net="{{ net }}">
+            <div class="result-banner result-reveal-pending {{ 'win' if net > 0 else ('push' if net == 0 else 'lose') }}" data-toast-result data-toast-label="{{ 'Win' if net > 0 else 'Loss' }}" data-toast-multiplier="{{ state.last.multiplier }}" data-toast-net="{{ net }}">
                 <strong>{{ state.last.outcome.title() }}</strong>
                 <span>{{ '%+d'|format(net) }} chips</span>
             </div>
@@ -84,7 +84,7 @@
                     <strong>{{ format_chips(state.bet) }}</strong>
                 </div>
                 <div>
-                    <span>Cashout</span>
+                    <span>Cash Out</span>
                     <strong>{{ format_chips(state.cashout) }}</strong>
                 </div>
             </div>
@@ -114,10 +114,10 @@
                     <input type="number" name="bet" min="1" value="100" required>
                 </label>
                 <label>
-                    Client seed
+                    Client Seed
                     <input name="client_seed" value="{{ current_user.username }}-hilo">
                 </label>
-                <button class="button primary" type="submit">Play Game</button>
+                <button class="button primary" type="submit">Start Round</button>
             </form>
         {% endif %}
     </aside>

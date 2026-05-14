@@ -8,7 +8,7 @@
     <div class="online-head">
         <div>
             <div class="section-kicker">Dragon Tiger</div>
-            <h1>Select table</h1>
+            <h1>Select Table</h1>
         </div>
         <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
     </div>
@@ -16,11 +16,12 @@
         {% for table in tables %}
             <div class="table-card">
                 <strong>Dragon Tiger {{ table.number }}</strong>
+                <small>Shoe {{ table.shoe_number }} / {{ table.shoe_round }} rounds</small>
                 <div class="mini-shoe">
                     {% for item in table.shoe %}
                         <i class="{{ item.winner }}">{{ item.winner[0]|upper }}</i>
                     {% else %}
-                        <em>No shoe yet</em>
+                        <em>Waiting for results</em>
                     {% endfor %}
                 </div>
                 <a class="button primary small" href="{{ url_for('dragon_tiger', table=table.number) }}">Join</a>
@@ -34,7 +35,7 @@
         <div class="table-header">
             <div>
                 <div class="section-kicker">Dragon Tiger {{ table_number }}</div>
-                <h1>Single card duel</h1>
+                <h1>Single Card Duel</h1>
             </div>
             <a class="button ghost small" href="{{ url_for('dragon_tiger') }}">Tables</a>
         </div>
@@ -42,22 +43,53 @@
         <div class="live-table-stage">
             <div class="live-round-head">
                 <div>
-                    <span>Next round</span>
-                    <strong data-live-status>Waiting</strong>
+                    <span>Next Round</span>
+                    <strong data-live-status>Waiting for Next Round</strong>
                 </div>
                 <div class="countdown-ring" data-live-countdown style="--progress: 1"><span>10</span></div>
             </div>
             <div class="live-card-table" data-live-cards>
-                <div class="loading-dot">Connecting to live shoe</div>
+                <div class="loading-dot">Connecting to Shoe</div>
             </div>
             <div data-live-result></div>
+        </div>
+
+        <div class="felt-bet-zones dragon-bet-zones" data-live-bet-zones>
+            <button type="button" class="felt-bet-zone dragon" data-live-wager="dragon">
+                <span>Dragon</span>
+                <small>1:1</small>
+                <strong data-zone-amount="dragon">0</strong>
+                <em data-zone-draft="dragon">Draft 0</em>
+                <i data-zone-stack="dragon"></i>
+            </button>
+            <button type="button" class="felt-bet-zone tie" data-live-wager="tie">
+                <span>Tie</span>
+                <small>Half back</small>
+                <strong data-zone-amount="tie">0</strong>
+                <em data-zone-draft="tie">Draft 0</em>
+                <i data-zone-stack="tie"></i>
+            </button>
+            <button type="button" class="felt-bet-zone tiger" data-live-wager="tiger">
+                <span>Tiger</span>
+                <small>1:1</small>
+                <strong data-zone-amount="tiger">0</strong>
+                <em data-zone-draft="tiger">Draft 0</em>
+                <i data-zone-stack="tiger"></i>
+            </button>
+        </div>
+        <div class="felt-bet-actions">
+            <span>Selected Chip <strong data-selected-chip-label>0</strong></span>
+            <span>Draft Total <strong data-live-draft-total>0</strong></span>
+            <button class="button primary" type="button" data-live-confirm>Confirm Bet</button>
+            <button class="button ghost" type="button" data-live-undo>Undo</button>
+            <button class="button ghost" type="button" data-live-clear>Clear</button>
         </div>
 
         <div class="road-panel" data-live-road>
             <div class="road-head">
                 <div>
-                    <div class="section-kicker">Roads</div>
-                    <h2>Live shoe</h2>
+                    <div class="section-kicker">Roadmap</div>
+                    <h2>Shoe History</h2>
                 </div>
             </div>
             <div class="road-grid" data-road-grid></div>
@@ -65,23 +97,19 @@
     </div>
 
     <aside class="bet-panel">
-        <form method="post" class="stacked-form" data-live-bet-form>
+        <form method="post" class="stacked-form" data-live-bet-form data-chip-mode="select">
             <input type="hidden" name="table" value="{{ table_number }}">
+            <input type="hidden" name="wager" value="dragon">
             <label>
-                Bet
+                Bet Amount
                 <input type="number" name="bet" min="1" value="100" required>
             </label>
             <label>
-                Client seed
+                Client Seed
                 <input name="client_seed" value="{{ current_user.username }}-dragon">
             </label>
-            <div class="segmented">
-                <label><input type="radio" name="wager" value="dragon" checked><span>Dragon</span></label>
-                <label><input type="radio" name="wager" value="tiger"><span>Tiger</span></label>
-                <label><input type="radio" name="wager" value="tie"><span>Tie</span></label>
-            </div>
-            <button class="button primary" type="submit">Lock Bet</button>
-            <div class="muted-line" data-live-bet-state>No bet locked.</div>
+            <button class="button primary" type="submit">Confirm Bet</button>
+            <div class="muted-line" data-live-bet-state>No active bet.</div>
         </form>
     </aside>
 </section>

@@ -8,6 +8,8 @@ const CARD_DRAW_MS = 1550;
 const CARD_DRAW_STEP_MS = 850;
 const RESULT_REVEAL_BUFFER_MS = 260;
 let balanceLockedUntil = 0;
+const CHIP_VALUES = [100, 500, 1000, 2000, 5000, 10000, 25000, 50000, 100000, 150000, 250000, 500000, 1000000, 2500000, 5000000, 10000000];
+let selectedChip = Number(localStorage.getItem("selectedChip") || 500);
 
 function escapeHtml(value) {
     return String(value ?? "")
@@ -22,11 +24,92 @@ function chips(value) {
     return Number(value || 0).toLocaleString();
 }
 
+function parseChips(value) {
+    return Number(String(value || "0").replace(/[^\d.-]/g, "")) || 0;
+}
+
+function chipLabel(value) {
+    if (value >= 1000000) return `${Number(value / 1000000).toLocaleString(undefined, { maximumFractionDigits: 1 })}M`;
+    if (value >= 1000) return `${Number(value / 1000).toLocaleString(undefined, { maximumFractionDigits: 0 })}K`;
+    return chips(value);
+}
+
+function formatChipLabel(amount) {
+    return chipLabel(Number(amount || 0));
+}
+
+function currentBalance() {
+    return parseChips(document.querySelector(".chip-balance")?.textContent);
+}
+
+function getSelectedChip() {
+    const balance = currentBalance();
+    if (balance > 0 && selectedChip > balance) {
+        selectedChip = Math.max(0, Math.min(balance, CHIP_VALUES.filter((value) => value <= balance).at(-1) || balance));
+    }
+    return Number(selectedChip || 0);
+}
+
+function setSelectedChip(value) {
+    const next = Math.max(0, Number(value || 0));
+    const balance = currentBalance();
+    selectedChip = balance > 0 ? Math.min(next, balance) : next;
+    localStorage.setItem("selectedChip", String(selectedChip));
+    updateAllChipSelections();
+    return selectedChip;
+}
+
+function updateAllChipSelections() {
+    document.querySelectorAll("[data-chip-value]").forEach((chip) => {
+        chip.classList.toggle("selected", Number(chip.dataset.chipValue || 0) === Number(selectedChip || 0));
+    });
+    document.querySelectorAll("[data-selected-chip-label]").forEach((item) => {
+        item.textContent = chips(getSelectedChip());
+    });
+}
+
+function draftBetTotal(draft) {
+    return Object.values(draft || {}).reduce((total, amount) => total + Number(amount || 0), 0);
+}
+
+function addChipToTarget(draft, targetKey, amount = getSelectedChip(), maxBalance = currentBalance()) {
+    const value = Number(amount || 0);
+    if (!targetKey || value <= 0) return { ok: false, error: "Select a chip first." };
+        if (draftBetTotal(draft) + value > maxBalance) return { ok: false, error: "Insufficient balance for this bet slip." };
+    draft[targetKey] = Number(draft[targetKey] || 0) + value;
+    return { ok: true, amount: draft[targetKey] };
+}
+
+function clearDraftBets(draft) {
+    Object.keys(draft || {}).forEach((key) => delete draft[key]);
+}
+
+function chipStackHtml(amount, { className = "", compact = false, label = true } = {}) {
+    const value = Number(amount || 0);
+    if (value <= 0) return "";
+    const count = Math.max(1, Math.min(5, Math.ceil(Math.log10(value + 1) - 1)));
+    const chipsHtml = Array.from({ length: count }, (_, index) => (
+        `<span class="placed-chip chip-${index % 8}" style="--i:${index}"></span>`
+    )).join("");
+    return `
+        <span class="chip-stack ${compact ? "compact" : ""} ${className}" title="${chips(value)}">
+            <span class="chip-stack-pile">${chipsHtml}</span>
+            ${label ? `<b>${formatChipLabel(value)}</b>` : ""}
+        </span>
+    `;
+}
+
+function renderChipStack(container, amount, options = {}) {
+    if (!container) return;
+    container.innerHTML = chipStackHtml(amount, options);
+}
+
 function setLiveBalance(value) {
     const balance = document.querySelector(".chip-balance");
     if (balance) {
         balance.textContent = chips(value);
     }
+    refreshChipTrays(Number(value || 0));
 }
 
 function lockBalance(ms = 0) {
@@ -138,7 +221,7 @@ function initRoundToasts() {
             showRoundToast({
                 multiplier: item.dataset.toastMultiplier || 0,
                 net: item.dataset.toastNet || 0,
-                label: Number(item.dataset.toastNet || 0) >= 0 ? "Win" : "Loss",
+                label: item.dataset.toastLabel || (Number(item.dataset.toastNet || 0) >= 0 ? "Win" : "Loss"),
             });
         }, delay + 430);
     });
@@ -155,9 +238,9 @@ function deferCardResults(scope = document) {
     if (!cards.length) return;
     const targets = [
         ...scope.querySelectorAll("[data-card-result]"),
-        ...scope.querySelectorAll(".baccarat-stage .result-banner, .baccarat-stage .fair-box"),
-        ...scope.querySelectorAll(".dragon-stage .result-banner, .dragon-stage .fair-box"),
-        ...scope.querySelectorAll(".hilo-stage .result-banner, .hilo-stage .fair-box"),
+        ...scope.querySelectorAll(".baccarat-stage .result-banner"),
+        ...scope.querySelectorAll(".dragon-stage .result-banner"),
+        ...scope.querySelectorAll(".hilo-stage .result-banner"),
     ];
     if (!targets.length) return;
     const maxIndex = cards.reduce((highest, card) => Math.max(highest, cardDrawIndex(card)), 0);
@@ -247,33 +330,91 @@ function newestLog(log) {
     return (log || []).slice(-8).reverse().map((entry) => `<div>${escapeHtml(entry)}</div>`).join("");
 }
 
-function fairPanel(data) {
-    const hash = data.pending?.server_seed_hash || data.fair?.server_seed_hash || "";
-    const seed = data.fair?.server_seed || "";
-    const revealAttr = seed ? " data-card-result" : "";
+function fairPayloadAttr(fair) {
+    try {
+        return escapeHtml(JSON.stringify(fair || {}));
+    } catch (_error) {
+        return "{}";
+    }
+}
+
+function fairButtonHtml(fair, label = "Fairness") {
+    if (!fair) return "";
     return `
-        <div class="control-card"${revealAttr}>
-            <div class="section-kicker">Fair seed</div>
-            <div class="fair-box">
-                <div><span>Server hash</span><code>${escapeHtml(hash)}</code></div>
-                ${seed ? `<div><span>Server seed</span><code>${escapeHtml(seed)}</code></div>` : ""}
-                <div><span>Nonce</span><code>${escapeHtml(data.pending?.nonce ?? data.fair?.nonce ?? "")}</code></div>
-            </div>
+        <div class="fair-launch">
+            <button class="button ghost small" type="button" data-fair-open data-fair-payload="${fairPayloadAttr(fair)}">${escapeHtml(label)}</button>
         </div>
     `;
 }
 
-function fairProofHtml(fair) {
-    if (!fair) return "";
+function fairPanel(data) {
+    const payload = {
+        id: data.fair?.id || data.pending?.id || data.round || "",
+        game: data.fair?.game || data.pending?.game || "",
+        server_seed_hash: data.pending?.server_seed_hash || data.fair?.server_seed_hash || "",
+        server_seed: data.fair?.server_seed || "",
+        client_seed: data.fair?.client_seed || data.client_seed || "",
+        nonce: data.pending?.nonce ?? data.fair?.nonce ?? "",
+        result: data.fair?.result || data.result || data.last || null,
+    };
+    const revealAttr = payload.server_seed ? " data-card-result" : "";
     return `
-        <div class="fair-box">
-            <div><span>Round</span><strong>${escapeHtml(fair.id)}</strong></div>
-            <div><span>Server hash</span><code>${escapeHtml(fair.server_seed_hash)}</code></div>
-            <div><span>Server seed</span><code>${escapeHtml(fair.server_seed)}</code></div>
-            <div><span>Client seed</span><code>${escapeHtml(fair.client_seed)}</code></div>
-            <div><span>Nonce</span><code>${escapeHtml(fair.nonce)}</code></div>
-        </div>
+        <div class="fair-anchor"${revealAttr}>${fairButtonHtml(payload)}</div>
     `;
+}
+
+function fairProofHtml(fair) {
+    return fairButtonHtml(fair);
+}
+
+function initChipBetting(scope = document) {
+    const balance = parseChips(document.querySelector(".chip-balance")?.textContent);
+    scope.querySelectorAll("input[name='bet']").forEach((input) => {
+        if (input.type === "hidden" || input.dataset.noChip === "1") return;
+        if (input.closest(".chip-bet-wrap")) return;
+        const wrapper = document.createElement("div");
+        wrapper.className = "chip-bet-wrap";
+        input.parentNode.insertBefore(wrapper, input);
+        wrapper.appendChild(input);
+        const tray = document.createElement("div");
+        tray.className = "chip-tray";
+        tray.innerHTML = chipTrayHtml(balance);
+        wrapper.appendChild(tray);
+        tray.addEventListener("click", (event) => {
+            const chip = event.target.closest("[data-chip-value]");
+            const clear = event.target.closest("[data-chip-clear]");
+            if (clear) {
+                input.value = "";
+                input.dispatchEvent(new Event("input", { bubbles: true }));
+                return;
+            }
+            if (!chip) return;
+            setSelectedChip(Number(chip.dataset.chipValue || 0));
+        });
+        input.addEventListener("input", () => {
+            const value = parseChips(input.value);
+            if (value > 0) setSelectedChip(value);
+        });
+        updateAllChipSelections();
+    });
+}
+
+function chipTrayHtml(balance) {
+    const usable = CHIP_VALUES.filter((value) => value <= Math.max(Number(balance || 0), 100));
+    return usable.map((value, index) => (
+        `<button type="button" class="bet-chip chip-${index % 8} ${Number(selectedChip) === value ? "selected" : ""}" data-chip-value="${value}" title="${chips(value)}">${chipLabel(value)}</button>`
+    )).join("") + `<button type="button" class="chip-clear" data-chip-clear>Clear</button>`;
+}
+
+function refreshChipTrays(balance = parseChips(document.querySelector(".chip-balance")?.textContent)) {
+    document.querySelectorAll(".chip-tray").forEach((tray) => {
+        tray.innerHTML = chipTrayHtml(balance);
+    });
+    updateAllChipSelections();
+}
+
+function displayChip(amount, extraClass = "") {
+    return chipStackHtml(amount, { className: extraClass, compact: true });
 }
 
 function initBlackjack() {
@@ -325,6 +466,7 @@ function initBlackjack() {
 
     function render(data) {
         setLiveBalance(data.my_balance);
+        root.dataset.balance = data.my_balance || 0;
         const players = Object.entries(data.players || {}).sort((a, b) => a[1].seat - b[1].seat);
         const occupied = new Map(players.map(([uid, player]) => [player.seat, [uid, player]]));
         const me = data.players?.[data.me];
@@ -366,7 +508,7 @@ function initBlackjack() {
                 <div><span>Phase</span><strong>${escapeHtml(data.phase)}</strong></div>
                 <div><span>Seats</span><strong>${players.length}/5</strong></div>
                 <div><span>Turn</span><strong>${currentTurn ? escapeHtml(data.players[currentTurn].username) : "Table"}</strong></div>
-                <div><span>Your chips</span><strong>${chips(data.my_balance)}</strong></div>
+                <div><span>Your Chips</span><strong>${chips(data.my_balance)}</strong></div>
             </div>
             <div class="dealer-zone">
                 <small data-card-result>Dealer ${dealerTotal ? `/ ${dealerTotal}` : ""}</small>
@@ -386,53 +528,129 @@ function initBlackjack() {
             <div class="online-controls">
                 ${fairPanel(data)}
                 <div class="control-card">
-                    <div class="section-kicker">Table log</div>
+                    <div class="section-kicker">Table Log</div>
                     <div class="log-box">${newestLog(data.log)}</div>
                 </div>
             </div>
         `;
         deferCardResults(root);
+        initChipBetting(root);
+        root.querySelectorAll("[data-bj-form='deal']").forEach(syncBlackjackBetForm);
+    }
+
+    function blackjackDraftValue(key) {
+        if (key === "bet") return parseChips(betDraft);
+        if (key === "pair_bet") return parseChips(pairDraft);
+        if (key === "plus3_bet") return parseChips(plus3Draft);
+        return 0;
+    }
+
+    function setBlackjackDraftValue(key, value) {
+        const next = String(Math.max(0, Number(value || 0)));
+        if (key === "bet") {
+            betDraft = next;
+            localStorage.setItem("blackjackBet", betDraft);
+        }
+        if (key === "pair_bet") {
+            pairDraft = next;
+            localStorage.setItem("blackjackPairBet", pairDraft);
+        }
+        if (key === "plus3_bet") {
+            plus3Draft = next;
+            localStorage.setItem("blackjackPlus3Bet", plus3Draft);
+        }
+    }
+
+    function blackjackDraftTotal() {
+        return blackjackDraftValue("bet") + blackjackDraftValue("pair_bet") + blackjackDraftValue("plus3_bet");
+    }
+
+    function syncBlackjackBetForm(form = root.querySelector("[data-bj-form='deal']")) {
+        if (!form) return;
+        ["bet", "pair_bet", "plus3_bet"].forEach((key) => {
+            const value = blackjackDraftValue(key);
+            const input = form.querySelector(`[name='${key}']`);
+            if (input && input.value !== String(value)) input.value = String(value);
+            const total = form.querySelector(`[data-bj-spot-total='${key}']`);
+            if (total) total.textContent = value ? chips(value) : "0";
+            renderChipStack(form.querySelector(`[data-bj-spot-stack='${key}']`), value, { className: "blackjack-chip-stack", compact: true });
+        });
+        const totalNode = form.querySelector("[data-bj-total]");
+        if (totalNode) totalNode.textContent = chips(blackjackDraftTotal());
+    }
+
+    function addBlackjackChip(key, form) {
+        const amount = getSelectedChip();
+        const nextTotal = blackjackDraftTotal() + amount;
+        if (!amount) return;
+        if (nextTotal > Number(root.dataset.balance || currentBalance())) {
+            lastError = "Insufficient balance for this bet slip.";
+            const error = form?.querySelector("[data-bj-draft-error]");
+            if (error) error.textContent = lastError;
+            syncBlackjackBetForm(form);
+            return;
+        }
+        const error = form?.querySelector("[data-bj-draft-error]");
+        if (error) error.textContent = "";
+        setBlackjackDraftValue(key, blackjackDraftValue(key) + amount);
+        syncBlackjackBetForm(form);
+    }
+
+    function blackjackBetSpotHtml(key, label, hint, amount) {
+        return `
+            <button class="blackjack-bet-spot" type="button" data-bj-bet-spot="${key}">
+                <span>${label}</span>
+                <small>${hint}</small>
+                <strong data-bj-spot-total="${key}">${chips(amount || 0)}</strong>
+                <i data-bj-spot-stack="${key}">${chipStackHtml(amount, { className: "blackjack-chip-stack", compact: true })}</i>
+            </button>
+        `;
+    }
+
+    function blackjackBetFormHtml({ joined, me }) {
+        const betValue = parseChips(betDraft || me?.bet || 0);
+        const pairValue = parseChips(pairDraft || me?.pair_bet || 0);
+        const plus3Value = parseChips(plus3Draft || me?.plus3_bet || 0);
+        const seedValue = seedDraft || me?.client_seed || `${me?.username || "blackjack"}-blackjack`;
+        return `
+            <form class="blackjack-bet-strip" data-bj-form="deal" data-joined="${joined ? "1" : "0"}">
+                <div class="blackjack-bet-header">
+                    <span>Selected Chip <strong data-selected-chip-label>${chips(getSelectedChip())}</strong></span>
+                    <span>Total Draft <strong data-bj-total>${chips(betValue + pairValue + plus3Value)}</strong></span>
+                </div>
+                <div class="blackjack-bet-spots">
+                    ${blackjackBetSpotHtml("bet", "Main Bet", "Base bet", betValue)}
+                    ${blackjackBetSpotHtml("pair_bet", "Pair", "Side bet", pairValue)}
+                    ${blackjackBetSpotHtml("plus3_bet", "21+3", "Side bet", plus3Value)}
+                </div>
+                <div class="control-row blackjack-exact-row">
+                    <label>Main<input name="bet" type="number" min="0" value="${escapeHtml(betValue)}"></label>
+                    <label>Pair<input name="pair_bet" type="number" min="0" value="${escapeHtml(pairValue)}"></label>
+                    <label>21+3<input name="plus3_bet" type="number" min="0" value="${escapeHtml(plus3Value)}"></label>
+                    <label>Client Seed<input name="client_seed" value="${escapeHtml(seedValue)}"></label>
+                </div>
+                <div class="control-row blackjack-deal-row">
+                    <button class="button primary" type="submit">Deal</button>
+                    <button class="button ghost" type="button" data-bj-clear>Clear Bets</button>
+                    ${joined ? `<button class="button ghost" type="button" data-bj="leave">Leave</button>` : ""}
+                </div>
+                <div class="muted-line" data-bj-draft-error></div>
+            </form>
+        `;
     }
 
     function blackjackControls(data, me) {
         const canBet = ["waiting", "betting", "resolved"].includes(data.phase);
         if (!me && canBet) {
-            return `
-                <form class="blackjack-bet-strip" data-bj-form="deal" data-joined="0">
-                    <div class="control-row blackjack-bets">
-                        <label>Bet<input name="bet" type="number" min="1" value="${escapeHtml(betDraft)}"></label>
-                        <label>Pair<input name="pair_bet" type="number" min="0" value="${escapeHtml(pairDraft)}"></label>
-                        <label>21+3<input name="plus3_bet" type="number" min="0" value="${escapeHtml(plus3Draft)}"></label>
-                        <label>Client seed<input name="client_seed" value="${escapeHtml(seedDraft || "blackjack")}"></label>
-                    </div>
-                    <button class="button primary" type="submit">Deal</button>
-                </form>
-            `;
+            return blackjackBetFormHtml({ joined: false, me: null });
         }
         if (!me) {
-            return `<div class="muted-line">A hand is running. Join before the next deal.</div>`;
+            return `<div class="muted-line">Round in progress. Join the next hand.</div>`;
         }
         const myTurn = data.current_turn === data.me;
         let html = "";
         if (canBet) {
-            const betValue = betDraft || me.bet || 100;
-            const pairValue = pairDraft || me.pair_bet || 0;
-            const plus3Value = plus3Draft || me.plus3_bet || 0;
-            const seedValue = seedDraft || me.client_seed || `${me.username}-blackjack`;
-            html += `
-                <form class="blackjack-bet-strip" data-bj-form="deal" data-joined="1">
-                    <div class="control-row blackjack-bets">
-                        <label>Bet<input name="bet" type="number" min="1" value="${escapeHtml(betValue)}"></label>
-                        <label>Pair<input name="pair_bet" type="number" min="0" value="${escapeHtml(pairValue)}"></label>
-                        <label>21+3<input name="plus3_bet" type="number" min="0" value="${escapeHtml(plus3Value)}"></label>
-                        <label>Client seed<input name="client_seed" value="${escapeHtml(seedValue)}"></label>
-                    </div>
-                    <div class="control-row">
-                        <button class="button primary" type="submit">Deal</button>
-                        <button class="button ghost" type="button" data-bj="leave">Leave</button>
-                    </div>
-                </form>
-            `;
+            html += blackjackBetFormHtml({ joined: true, me });
         }
         if (myTurn) {
             html += `
@@ -445,12 +663,27 @@ function initBlackjack() {
             `;
         }
         if (!html) {
-            html = `<div class="muted-line">Waiting on the table.</div>`;
+            html = `<div class="muted-line">Waiting for the table.</div>`;
         }
         return html;
     }
 
     root.addEventListener("click", async (event) => {
+        const spot = event.target.closest("[data-bj-bet-spot]");
+        if (spot) {
+            lastError = "";
+            addBlackjackChip(spot.dataset.bjBetSpot, spot.closest("[data-bj-form='deal']"));
+            return;
+        }
+        const clear = event.target.closest("[data-bj-clear]");
+        if (clear) {
+            lastError = "";
+            setBlackjackDraftValue("bet", 0);
+            setBlackjackDraftValue("pair_bet", 0);
+            setBlackjackDraftValue("plus3_bet", 0);
+            syncBlackjackBetForm(clear.closest("[data-bj-form='deal']"));
+            return;
+        }
         const action = event.target.closest("[data-bj]")?.dataset.bj;
         if (!action) return;
         try {
@@ -499,14 +732,17 @@ function initBlackjack() {
         if (target?.name === "bet") {
             betDraft = target.value;
             localStorage.setItem("blackjackBet", betDraft);
+            syncBlackjackBetForm(target.closest("[data-bj-form='deal']"));
         }
         if (target?.name === "pair_bet") {
             pairDraft = target.value;
             localStorage.setItem("blackjackPairBet", pairDraft);
+            syncBlackjackBetForm(target.closest("[data-bj-form='deal']"));
         }
         if (target?.name === "plus3_bet") {
             plus3Draft = target.value;
             localStorage.setItem("blackjackPlus3Bet", plus3Draft);
+            syncBlackjackBetForm(target.closest("[data-bj-form='deal']"));
         }
         if (target?.name === "client_seed") {
             seedDraft = target.value;
@@ -572,8 +808,8 @@ function initHoldem() {
             <div class="table-meta">
                 <div><span>Phase</span><strong>${escapeHtml(data.phase)}</strong></div>
                 <div><span>Pot</span><strong>${chips(data.pot)}</strong></div>
-                <div><span>Current bet</span><strong>${chips(data.current_bet)}</strong></div>
-                <div><span>Your chips</span><strong>${chips(data.my_balance)}</strong></div>
+                <div><span>Current Bet</span><strong>${chips(data.current_bet)}</strong></div>
+                <div><span>Your Chips</span><strong>${chips(data.my_balance)}</strong></div>
             </div>
             <div class="community-zone">
                 <small>Community</small>
@@ -588,7 +824,7 @@ function initHoldem() {
                 </div>
                 ${fairPanel(data)}
                 <div class="control-card">
-                    <div class="section-kicker">Table log</div>
+                    <div class="section-kicker">Table Log</div>
                     <div class="log-box">${newestLog(data.log)}</div>
                 </div>
             </div>
@@ -598,16 +834,16 @@ function initHoldem() {
 
     function holdemControls(data, me) {
         if (!me) {
-            return `<button class="button primary" data-holdem="join">Join table</button>`;
+            return `<button class="button primary" data-holdem="join">Join Table</button>`;
         }
         const lobbyPhase = ["waiting", "resolved", "showdown"].includes(data.phase);
         if (lobbyPhase) {
             return `
                 <form class="stacked-form" data-holdem-form="seed">
-                    <label>Client seed<input name="client_seed" value="${escapeHtml(me.client_seed || `${me.username}-holdem`)}"></label>
+                    <label>Client Seed<input name="client_seed" value="${escapeHtml(me.client_seed || `${me.username}-holdem`)}"></label>
                     <div class="control-row">
-                        <button class="button secondary" type="submit">Save seed</button>
-                        <button class="button primary" type="button" data-holdem="start">Start hand</button>
+                        <button class="button secondary" type="submit">Save Seed</button>
+                        <button class="button primary" type="button" data-holdem="start">Start Hand</button>
                         <button class="button ghost" type="button" data-holdem="leave">Leave</button>
                     </div>
                 </form>
@@ -674,29 +910,162 @@ function initRouletteBoard() {
     const form = document.querySelector("[data-roulette-form]");
     const board = document.querySelector("[data-roulette-board]");
     if (!form || !board) return;
-    const typeInput = form.querySelector("input[name='bet_type']");
-    const numberInput = form.querySelector("input[name='number']");
+    const amountInput = form.querySelector("input[name='bet']");
+    const multiInput = form.querySelector("input[name='multi_bets']");
+    const clearButton = form.querySelector("[data-roulette-clear]");
+    const undoButton = form.querySelector("[data-roulette-undo]");
+    const slip = form.querySelector("[data-roulette-slip]");
+    const totalNode = form.querySelector("[data-roulette-total]");
+    const overlays = board.querySelector("[data-roulette-overlays]");
+    const bets = [];
 
-    function selectButton(button) {
-        board.querySelectorAll("button").forEach((item) => item.classList.remove("selected"));
-        button.classList.add("selected");
-        typeInput.value = button.dataset.betType;
-        if (button.dataset.number) {
-            numberInput.value = button.dataset.number;
+    function numbersKey(numbers) {
+        return [...numbers].sort((a, b) => a - b).join("-");
+    }
+
+    function cssEscape(value) {
+        if (window.CSS?.escape) return CSS.escape(value);
+        return String(value).replace(/["\\]/g, "\\$&");
+    }
+
+    function parseBetNumbers(raw) {
+        return String(raw || "")
+            .split(",")
+            .map((value) => Number(value.trim()))
+            .filter((value) => Number.isInteger(value) && value >= 0 && value <= 36);
+    }
+
+    function addOverlayButton(kind, numbers, x, y, label) {
+        if (!overlays || !numbers.length) return;
+        const key = numbersKey(numbers);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `roulette-overlay-bet ${kind}`;
+        button.style.left = `${x}%`;
+        button.style.top = `${y}%`;
+        button.dataset.numbers = numbers.join(",");
+        button.dataset.label = label || key;
+        button.dataset.betKey = key;
+        overlays.appendChild(button);
+    }
+
+    function buildOverlays() {
+        if (!overlays || overlays.dataset.ready) return;
+        overlays.dataset.ready = "1";
+        const rows = [
+            [3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36],
+            [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35],
+            [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34],
+        ];
+        rows.forEach((row, rowIndex) => {
+            for (let column = 0; column < 11; column += 1) {
+                addOverlayButton("split-x", [row[column], row[column + 1]], ((column + 1) / 12) * 100, ((rowIndex + 0.5) / 3) * 100, `${row[column]}-${row[column + 1]}`);
+            }
+        });
+        for (let column = 0; column < 12; column += 1) {
+            addOverlayButton("split-y", [rows[0][column], rows[1][column]], ((column + 0.5) / 12) * 100, (1 / 3) * 100, `${rows[0][column]}-${rows[1][column]}`);
+            addOverlayButton("split-y", [rows[1][column], rows[2][column]], ((column + 0.5) / 12) * 100, (2 / 3) * 100, `${rows[1][column]}-${rows[2][column]}`);
+        }
+        for (let row = 0; row < 2; row += 1) {
+            for (let column = 0; column < 11; column += 1) {
+                const numbers = [rows[row][column], rows[row][column + 1], rows[row + 1][column], rows[row + 1][column + 1]];
+                addOverlayButton("corner", numbers, ((column + 1) / 12) * 100, ((row + 1) / 3) * 100, numbers.join("-"));
+            }
+        }
+        for (let column = 0; column < 12; column += 1) {
+            const numbers = [rows[0][column], rows[1][column], rows[2][column]];
+            addOverlayButton("street", numbers, ((column + 0.5) / 12) * 100, 103, `${numbers[2]}-${numbers[0]}`);
+        }
+        for (let column = 0; column < 11; column += 1) {
+            const numbers = [rows[0][column], rows[1][column], rows[2][column], rows[0][column + 1], rows[1][column + 1], rows[2][column + 1]];
+            addOverlayButton("sixline", numbers, ((column + 1) / 12) * 100, 103, `${numbers[2]}-${numbers[3]}`);
         }
     }
 
+    function renderBoardChips() {
+        board.querySelectorAll(".roulette-chip-stack").forEach((chip) => chip.remove());
+        const totals = new Map();
+        bets.forEach((item) => {
+            const key = numbersKey(item.numbers);
+            totals.set(key, (totals.get(key) || 0) + Number(item.amount || 0));
+        });
+        totals.forEach((amount, key) => {
+            const target = board.querySelector(`[data-bet-key="${cssEscape(key)}"]`) || board.querySelector(`[data-numbers="${cssEscape(key.replaceAll("-", ","))}"]`);
+            if (target) {
+                const isOverlay = target.classList.contains("roulette-overlay-bet");
+                target.insertAdjacentHTML("beforeend", chipStackHtml(amount, { className: "roulette-chip-stack", compact: true, label: !isOverlay }));
+            }
+        });
+    }
+
+    function renderSlip() {
+        if (multiInput) multiInput.value = JSON.stringify(bets);
+        if (totalNode) totalNode.textContent = chips(bets.reduce((total, item) => total + Number(item.amount || 0), 0));
+        renderBoardChips();
+        if (!slip) return;
+        if (!bets.length) {
+            slip.innerHTML = `<span class="muted-line">Select a chip, then choose a bet.</span>`;
+            return;
+        }
+        slip.innerHTML = bets.map((item, index) => `
+            <div>
+                <strong>${escapeHtml(item.label)}</strong>
+                <span>${chips(item.amount)}</span>
+                <button type="button" class="button ghost small" data-slip-remove="${index}">Remove</button>
+            </div>
+        `).join("");
+    }
+
+    function placeRouletteChip(button) {
+        const amount = getSelectedChip() || parseChips(amountInput?.value);
+        const numbers = parseBetNumbers(button.dataset.numbers);
+        if (!amount || !numbers.length) return;
+        if (draftBetTotal(Object.fromEntries(bets.map((item, index) => [index, item.amount]))) + amount > currentBalance()) {
+            if (slip) slip.innerHTML = `<span class="flash error">Insufficient balance for this bet slip.</span>`;
+            return;
+        }
+        const key = numbersKey(numbers);
+        button.dataset.betKey = key;
+        bets.push({ numbers, label: button.dataset.label || key, amount });
+        renderSlip();
+    }
+
+    buildOverlays();
+
     board.addEventListener("click", (event) => {
-        const button = event.target.closest("button[data-bet-type]");
+        const button = event.target.closest("button[data-numbers]");
         if (!button) return;
-        selectButton(button);
+        placeRouletteChip(button);
     });
 
-    const initialSelector = typeInput.value === "number"
-        ? `[data-bet-type="number"][data-number="${numberInput.value}"]`
-        : `[data-bet-type="${typeInput.value}"]`;
-    const initialButton = board.querySelector(initialSelector) || board.querySelector("[data-bet-type='red']");
-    if (initialButton) selectButton(initialButton);
+    if (clearButton) {
+        clearButton.addEventListener("click", () => {
+            bets.splice(0, bets.length);
+            renderSlip();
+        });
+    }
+    if (undoButton) {
+        undoButton.addEventListener("click", () => {
+            bets.pop();
+            renderSlip();
+        });
+    }
+    if (slip) {
+        slip.addEventListener("click", (event) => {
+            const remove = event.target.closest("[data-slip-remove]");
+            if (!remove) return;
+            bets.splice(Number(remove.dataset.slipRemove), 1);
+            renderSlip();
+        });
+    }
+
+    form.addEventListener("submit", (event) => {
+        if (bets.length) return;
+        event.preventDefault();
+        if (slip) slip.innerHTML = `<span class="flash error">Place at least one chip on the table.</span>`;
+    });
+
+    renderSlip();
 }
 
 function initPlinko() {
@@ -767,7 +1136,7 @@ function initPlinko() {
         }
     }
 
-    async function animateBall(path, rows, slot, onImpact = () => {}) {
+    async function animateBall(path, rows, slot, onImpact = () => {}, fast = false) {
         const ball = document.createElement("div");
         ball.className = "plinko-ball active-ball";
         board.appendChild(ball);
@@ -802,7 +1171,7 @@ function initPlinko() {
                 };
             }),
             {
-                duration: Math.max(1100, rows * 130),
+                duration: fast ? Math.max(520, rows * 58) : Math.max(1100, rows * 130),
                 easing: "cubic-bezier(.2,.75,.24,1)",
                 fill: "forwards",
             }
@@ -818,7 +1187,7 @@ function initPlinko() {
                 { transform: finalTransform, opacity: 0 },
             ],
             {
-                duration: 520,
+                duration: fast ? 240 : 520,
                 easing: "cubic-bezier(.2,.85,.24,1)",
                 fill: "forwards",
             }
@@ -863,10 +1232,10 @@ function initPlinko() {
         });
     }
 
-    async function dropOnce() {
+    async function dropOnce(fast = false) {
         lockBalance(5000);
         const data = await postForm("/api/plinko/drop", Object.fromEntries(new FormData(form)));
-        lockBalance(Math.max(1800, Number(data.rows || 12) * 150 + 900));
+        lockBalance(fast ? 1200 : Math.max(1800, Number(data.rows || 12) * 150 + 900));
         board.dataset.rows = data.rows;
         if (rowInput) rowInput.value = data.rows;
         if (rowLabel) rowLabel.textContent = String(data.rows);
@@ -874,7 +1243,7 @@ function initPlinko() {
         board.dataset.slot = data.slot;
         renderPegs(data.rows);
         renderPockets(data.multipliers, null);
-        await animateBall(data.path, data.rows, data.slot, () => revealPocket(data.slot));
+        await animateBall(data.path, data.rows, data.slot, () => revealPocket(data.slot), fast);
         balanceLockedUntil = 0;
         setLiveBalance(data.balance);
         showPlinkoResult(data);
@@ -897,21 +1266,29 @@ function initPlinko() {
         });
         const autoButton = document.querySelector("[data-plinko-auto]");
         if (autoButton) {
+            let autoRunning = false;
             autoButton.addEventListener("click", async () => {
+                if (autoRunning) {
+                    autoRunning = false;
+                    return;
+                }
                 const count = Math.max(1, Math.min(100, Number(document.querySelector("[data-plinko-auto-count]")?.value || 1)));
-                autoButton.disabled = true;
-                autoButton.textContent = "Running";
+                autoRunning = true;
+                autoButton.textContent = "Stop Auto";
+                autoButton.classList.add("danger");
                 for (let index = 0; index < count; index += 1) {
+                    if (!autoRunning) break;
                     try {
-                        await dropOnce();
+                        await dropOnce(true);
                     } catch (error) {
                         balanceLockedUntil = 0;
                         if (resultBox) resultBox.innerHTML = `<div class="flash error">${escapeHtml(error.message)}</div>`;
                         break;
                     }
                 }
-                autoButton.disabled = false;
+                autoRunning = false;
                 autoButton.textContent = "Auto Drop";
+                autoButton.classList.remove("danger");
             });
         }
     }
@@ -1023,6 +1400,7 @@ function initStatsModal() {
         modal.hidden = true;
         if (tooltip) tooltip.hidden = true;
         if (hoverLine) hoverLine.hidden = true;
+        if (!isModalOpen()) document.body.classList.remove("modal-open");
     }
 
     function moveDialog(left, top) {
@@ -1113,13 +1491,118 @@ function initStatsModal() {
     }, 5000);
 }
 
+function isModalOpen() {
+    return Boolean(document.querySelector("[data-fairness-modal]:not([hidden]), [data-stats-modal]:not([hidden])"));
+}
+
+function initFairnessModal() {
+    const modal = document.querySelector("[data-fairness-modal]");
+    if (!modal) return;
+    const body = modal.querySelector("[data-fairness-body]");
+    let lastFocus = null;
+
+    function formatFairValue(value, fallback = "Not available") {
+        if (value === null || value === undefined || value === "") return fallback;
+        if (typeof value === "object") return JSON.stringify(value, null, 2);
+        return String(value);
+    }
+
+    function fairDetail(label, value, { code = true, fallback = "Not available" } = {}) {
+        const display = formatFairValue(value, fallback);
+        return `
+            <div>
+                <span>${escapeHtml(label)}</span>
+                ${code ? `<code>${escapeHtml(display)}</code>` : `<strong>${escapeHtml(display)}</strong>`}
+            </div>
+        `;
+    }
+
+    function renderFairness(fair) {
+        const resultProof = fair.result || fair.proof || fair.settlements || null;
+        const serverSeedFallback = fair.server_seed_hash ? "Hidden until round ends" : "Not available";
+        body.innerHTML = `
+            <div class="fairness-grid">
+                ${fairDetail("Round ID", fair.id || fair.round, { code: false })}
+                ${fairDetail("Game", fair.game, { code: false })}
+                ${fairDetail("Server Seed Hash", fair.server_seed_hash)}
+                ${fairDetail("Server Seed", fair.server_seed, { fallback: serverSeedFallback })}
+                ${fairDetail("Client Seed", fair.client_seed)}
+                ${fairDetail("Nonce", fair.nonce)}
+            </div>
+            <div class="fairness-proof">
+                <span>Result Proof</span>
+                <pre>${escapeHtml(formatFairValue(resultProof, "The result proof appears after this round resolves."))}</pre>
+            </div>
+            <p class="muted-line">Verify the round by hashing the revealed server seed with the client seed, nonce, and game inputs. The seed hash is committed before betting.</p>
+        `;
+    }
+
+    function openFairness(fair, opener) {
+        lastFocus = opener || document.activeElement;
+        renderFairness(fair || {});
+        modal.hidden = false;
+        document.body.classList.add("modal-open");
+        modal.querySelector("[data-fairness-close]")?.focus();
+    }
+
+    function closeFairness() {
+        modal.hidden = true;
+        if (!isModalOpen()) document.body.classList.remove("modal-open");
+        if (lastFocus && typeof lastFocus.focus === "function") lastFocus.focus();
+    }
+
+    document.addEventListener("click", (event) => {
+        const opener = event.target.closest("[data-fair-open]");
+        if (!opener) return;
+        event.preventDefault();
+        let payload = {};
+        try {
+            payload = JSON.parse(opener.dataset.fairPayload || "{}");
+        } catch (_error) {
+            payload = {};
+        }
+        openFairness(payload, opener);
+    });
+    modal.querySelectorAll("[data-fairness-close]").forEach((button) => button.addEventListener("click", closeFairness));
+    document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && !modal.hidden) closeFairness();
+    });
+}
+
 function initChat() {
     const windowEl = document.querySelector("[data-chat-window]");
     if (!windowEl) return;
     const messagesEl = windowEl.querySelector("[data-chat-messages]");
     const form = windowEl.querySelector("[data-chat-form]");
     const rainForm = windowEl.querySelector("[data-rain-form]");
-    const toggle = windowEl.querySelector("[data-chat-toggle]");
+    const toggles = document.querySelectorAll("[data-chat-toggle]");
+
+    function chatCollapsed() {
+        return document.body.classList.contains("chat-collapsed");
+    }
+
+    function setChatCollapsed(collapsed, persist = true) {
+        windowEl.classList.toggle("is-collapsed", collapsed);
+        document.body.classList.toggle("chat-collapsed", collapsed);
+        toggles.forEach((button) => {
+            button.setAttribute("aria-expanded", String(!collapsed));
+            if (button.closest("[data-chat-window]")) {
+                button.textContent = "Hide Chat";
+            }
+        });
+        if (!persist) return;
+        try {
+            localStorage.setItem("novaChatCollapsed", collapsed ? "true" : "false");
+        } catch (_error) {
+            // Storage can be blocked in private contexts.
+        }
+    }
+
+    try {
+        setChatCollapsed(localStorage.getItem("novaChatCollapsed") === "true" || chatCollapsed(), false);
+    } catch (_error) {
+        setChatCollapsed(chatCollapsed(), false);
+    }
 
     async function loadChat() {
         const data = await getJson("/api/chat");
@@ -1133,12 +1616,21 @@ function initChat() {
         messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
-    if (toggle) {
+    toggles.forEach((toggle) => {
         toggle.addEventListener("click", () => {
-            windowEl.classList.toggle("is-collapsed");
-            toggle.textContent = windowEl.classList.contains("is-collapsed") ? "Chat" : "Hide";
+            setChatCollapsed(!chatCollapsed());
         });
-    }
+    });
+    window.addEventListener("storage", (event) => {
+        if (event.key === "novaChatCollapsed") {
+            setChatCollapsed(event.newValue === "true", false);
+        }
+    });
+    document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && !chatCollapsed() && !isModalOpen()) {
+            setChatCollapsed(true);
+        }
+    });
     if (form) {
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
@@ -1240,11 +1732,18 @@ function initLimboAuto() {
 
     const autoButton = document.querySelector("[data-limbo-auto]");
     if (autoButton) {
+        let autoRunning = false;
         autoButton.addEventListener("click", async () => {
+            if (autoRunning) {
+                autoRunning = false;
+                return;
+            }
             const count = Math.max(1, Math.min(100, Number(document.querySelector("[data-limbo-auto-count]")?.value || 1)));
-            autoButton.disabled = true;
-            autoButton.textContent = "Running";
+            autoRunning = true;
+            autoButton.textContent = "Stop Auto";
+            autoButton.classList.add("danger");
             for (let index = 0; index < count; index += 1) {
+                if (!autoRunning) break;
                 try {
                     await playOnce();
                     await new Promise((resolve) => window.setTimeout(resolve, 420));
@@ -1253,8 +1752,9 @@ function initLimboAuto() {
                     break;
                 }
             }
-            autoButton.disabled = false;
+            autoRunning = false;
             autoButton.textContent = "Auto Bet";
+            autoButton.classList.remove("danger");
         });
     }
 }
@@ -1271,6 +1771,7 @@ function initMines() {
     const cashoutButton = shell.querySelector("[data-mines-cashout]");
     const randomButton = shell.querySelector("[data-mines-random]");
     const autoButton = shell.querySelector("[data-mines-auto]");
+    const startButton = startForm?.querySelector("button[type='submit']");
 
     if (countInput && countLabel) {
         countInput.addEventListener("input", () => {
@@ -1306,12 +1807,17 @@ function initMines() {
             const nextAmount = state.next_multiplier ? Math.floor(Number(state.bet || 0) * Number(state.next_multiplier || 1)) : 0;
             statusBox.innerHTML = `
                 <div><span>Multiplier</span><strong>${Number(state.multiplier || 1).toLocaleString(undefined, { maximumFractionDigits: 4 })}x</strong></div>
-                <div><span>Cashout</span><strong>${chips(state.cashout || 0)}</strong></div>
+                <div><span>Cash Out</span><strong>${chips(state.cashout || 0)}</strong></div>
                 <div><span>Next Tile</span><strong>${state.next_multiplier ? `${Number(state.next_multiplier).toLocaleString(undefined, { maximumFractionDigits: 4 })}x / ${chips(nextAmount)}` : "-"}</strong></div>
             `;
         }
         if (cashoutButton) cashoutButton.disabled = !state.active;
         if (randomButton) randomButton.disabled = !state.active;
+        if (startButton) {
+            startButton.disabled = Boolean(state.active);
+            startButton.classList.toggle("danger", Boolean(state.active));
+            startButton.textContent = state.active ? "Round in Progress" : "Start Round";
+        }
     }
 
     async function refresh() {
@@ -1339,7 +1845,7 @@ function initMines() {
             const win = Number(state.last.net || 0) > 0;
             resultBox.innerHTML = `
                 <div class="result-banner ${win ? "win" : "lose"}">
-                    <strong>${state.last.outcome === "cashout" ? "Cashout" : "Mine"} at ${Number(state.last.multiplier || 1).toLocaleString(undefined, { maximumFractionDigits: 4 })}x</strong>
+                    <strong>${state.last.outcome === "cashout" ? "Cashed Out" : "Bomb"} at ${Number(state.last.multiplier || 1).toLocaleString(undefined, { maximumFractionDigits: 4 })}x</strong>
                     <span>${signedChips(state.last.net)} chips</span>
                 </div>
                 ${fairProofHtml(state.last.fair)}
@@ -1381,7 +1887,7 @@ function initMines() {
                 if (resultBox) {
                     resultBox.innerHTML = `
                         <div class="result-banner ${win ? "win" : "lose"}">
-                            <strong>Cashout at ${Number(payload.state.last.multiplier || 1).toLocaleString(undefined, { maximumFractionDigits: 4 })}x</strong>
+                            <strong>Cashed Out at ${Number(payload.state.last.multiplier || 1).toLocaleString(undefined, { maximumFractionDigits: 4 })}x</strong>
                             <span>${signedChips(payload.state.last.net)} chips</span>
                         </div>
                         ${fairProofHtml(payload.state.last.fair)}
@@ -1399,15 +1905,22 @@ function initMines() {
         }));
     }
     if (autoButton) {
+        let autoRunning = false;
         autoButton.addEventListener("click", async () => {
+            if (autoRunning) {
+                autoRunning = false;
+                return;
+            }
             const picks = Math.max(1, Math.min(24, Number(shell.querySelector("[data-mines-auto-picks]")?.value || 1)));
-            autoButton.disabled = true;
-            autoButton.textContent = "Running";
+            autoRunning = true;
+            autoButton.textContent = "Stop Auto";
+            autoButton.classList.add("danger");
             try {
                 if (!grid.querySelector("button:not(:disabled)")) {
                     await startRound(Object.fromEntries(new FormData(startForm)));
                 }
                 for (let index = 0; index < picks; index += 1) {
+                    if (!autoRunning) break;
                     const payload = await revealTile(null, true);
                     if (!payload.state.active) break;
                     await new Promise((resolve) => window.setTimeout(resolve, 300));
@@ -1415,14 +1928,15 @@ function initMines() {
             } catch (error) {
                 if (resultBox) resultBox.innerHTML = `<div class="flash error">${escapeHtml(error.message)}</div>`;
             }
-            autoButton.disabled = false;
-            autoButton.textContent = "Auto Random";
+            autoRunning = false;
+            autoButton.textContent = "Auto Pick";
+            autoButton.classList.remove("danger");
         });
     }
     refresh().catch(() => {});
 }
 
-function renderRoadGrid(grid, history) {
+function renderRoadGrid(grid, history, data = {}) {
     const items = (history || []).slice(-54);
     const bead = items.map((item) => {
         const winner = item.winner || "?";
@@ -1445,6 +1959,11 @@ function renderRoadGrid(grid, history) {
     }).join("");
     if (grid) {
         grid.innerHTML = `
+            <div class="road-shoe-status">
+                <span>Shoe ${chips(data.shoe_number || 1)}</span>
+                <small>${chips(data.shoe_round || 0)} / ${chips(data.shoe_limit || 0)} rounds</small>
+                ${data.shoe_notice ? `<strong>${escapeHtml(data.shoe_notice)}</strong>` : ""}
+            </div>
             <div><strong>Bead</strong><div class="road-cells bead-road">${bead}</div></div>
             <div><strong>Big Road</strong><div class="road-cells big-road">${big}</div></div>
             <div><strong>Big Eye</strong><div class="road-cells mini-road">${derived}</div></div>
@@ -1455,14 +1974,15 @@ function renderRoadGrid(grid, history) {
 }
 
 function liveBaccaratHand(title, cards = [], total = "") {
-    const mainCards = cards.slice(0, 2).map((card, index) => cardHtml(card, false, true, index)).join("");
-    const extraCards = cards.slice(2).map((card, index) => cardHtml(card, true, true, index + 2)).join("");
+    const allCards = cards.map((card, index) => cardHtml(card, false, true, index)).join("");
     return `
-        <div class="live-hand">
-            <h2>${title} <span data-card-result>${total}</span></h2>
+        <div class="live-hand live-hand-line">
+            <div class="live-hand-label">
+                <span>${title}</span>
+                <strong data-card-result>${total}</strong>
+            </div>
             <div class="baccarat-card-layout">
-                <div class="main-card-stack">${mainCards || `<div class="muted-line">Waiting</div>`}</div>
-                <div class="third-card-row">${extraCards || `<span class="muted-line">No third card</span>`}</div>
+                <div class="live-card-row live-card-line">${allCards || `<div class="muted-line">Waiting</div>`}</div>
             </div>
         </div>
     `;
@@ -1473,10 +1993,21 @@ function renderLiveCards(shell, data, lastRound) {
     const cardsBox = shell.querySelector("[data-live-cards]");
     const resultBox = shell.querySelector("[data-live-result]");
     const current = data.current;
-    if (!current || !cardsBox) {
-        if (cardsBox) cardsBox.innerHTML = `<div class="loading-dot">First live round starts when the countdown ends.</div>`;
+    if (data.phase !== "dealing") {
+        if (cardsBox) {
+            cardsBox.innerHTML = `
+                <div class="live-waiting-panel">
+                    <strong>Betting Open</strong>
+                    <span>Next deal starts after the countdown.</span>
+                </div>
+            `;
+        }
         return;
     }
+        if (!current || !cardsBox) {
+            if (cardsBox) cardsBox.innerHTML = `<div class="loading-dot">First round starts when the countdown ends.</div>`;
+            return;
+        }
     if (Number(current.round || 0) === lastRound.value) return;
     lastRound.value = Number(current.round || 0);
     if (game === "baccarat") {
@@ -1487,14 +2018,14 @@ function renderLiveCards(shell, data, lastRound) {
         `;
     } else {
         cardsBox.innerHTML = `
-            <div class="live-hand">
-                <h2>Dragon <span data-card-result>${current.dragon_total ?? ""}</span></h2>
-                <div class="main-card-stack">${cardHtml(current.dragon, false, true, 0)}</div>
+            <div class="live-hand live-hand-line">
+                <div class="live-hand-label"><span>Dragon</span><strong data-card-result>${current.dragon_total ?? ""}</strong></div>
+                <div class="live-card-row live-card-line">${cardHtml(current.dragon, false, true, 0)}</div>
             </div>
             <div class="versus">VS</div>
-            <div class="live-hand">
-                <h2>Tiger <span data-card-result>${current.tiger_total ?? ""}</span></h2>
-                <div class="main-card-stack">${cardHtml(current.tiger, false, true, 1)}</div>
+            <div class="live-hand live-hand-line">
+                <div class="live-hand-label"><span>Tiger</span><strong data-card-result>${current.tiger_total ?? ""}</strong></div>
+                <div class="live-card-row live-card-line">${cardHtml(current.tiger, false, true, 1)}</div>
             </div>
         `;
     }
@@ -1503,7 +2034,7 @@ function renderLiveCards(shell, data, lastRound) {
         resultBox.innerHTML = `
             <div class="result-banner result-reveal-pending ${mine ? (mine.net > 0 ? "win" : mine.net === 0 ? "push" : "lose") : "push"}" data-card-result>
                 <strong>${escapeHtml(current.winner || "").replace("_", " ").toUpperCase()} wins</strong>
-                <span>${mine ? `${signedChips(mine.net)} chips` : "No bet this round"}</span>
+                <span>${mine ? `${signedChips(mine.net)} chips` : "No bet placed"}</span>
             </div>
             ${fairProofHtml(current.fair)}
         `;
@@ -1519,21 +2050,51 @@ function renderLiveCards(shell, data, lastRound) {
     }
 }
 
-function updateLiveStatus(shell, data) {
+function updateLiveStatus(shell, data, draft = {}) {
     const countdown = shell.querySelector("[data-live-countdown]");
     const status = shell.querySelector("[data-live-status]");
     const betState = shell.querySelector("[data-live-bet-state]");
+    const zones = [...shell.querySelectorAll("[data-live-wager]")];
     const seconds = Math.max(0, Number(data.countdown || 0));
     if (countdown) {
         countdown.style.setProperty("--progress", seconds / 10);
         const span = countdown.querySelector("span");
         if (span) span.textContent = String(seconds);
     }
-    if (status) status.textContent = seconds > 0 ? "Betting open" : "Dealing";
+    if (status) status.textContent = data.shoe_notice || (data.phase === "dealing" ? "Round in Progress" : "Betting Open");
     if (betState) {
         betState.textContent = data.pending_bet
-            ? `Locked ${chips(data.pending_bet.bet)} on ${String(data.pending_bet.wager).replace("_", " ")}`
-            : "No bet locked.";
+            ? `${chips(data.pending_bet.bet)} active on ${String(data.pending_bet.wager).replace("_", " ")}`
+            : "No active bet.";
+    }
+    if (zones.length) {
+        const totals = {};
+        (data.pending_bets || []).forEach((item) => {
+            totals[item.wager] = (totals[item.wager] || 0) + Number(item.bet || 0);
+        });
+        zones.forEach((zone) => {
+            const key = zone.dataset.liveWager;
+            const confirmed = totals[key] || 0;
+            const draftAmount = Number(draft[key] || 0);
+            const amount = zone.querySelector("[data-zone-amount]");
+            const draftNode = zone.querySelector("[data-zone-draft]");
+            const stackNode = zone.querySelector("[data-zone-stack]");
+            if (amount) amount.textContent = confirmed ? `Confirmed ${chips(confirmed)}` : "Confirmed 0";
+            if (draftNode) draftNode.textContent = draftAmount ? `Draft ${chips(draftAmount)}` : "Draft 0";
+            renderChipStack(stackNode, confirmed + draftAmount, { className: "felt-chip-stack", compact: true });
+            zone.classList.toggle("has-chip", confirmed + draftAmount > 0);
+            zone.classList.toggle("has-draft", draftAmount > 0);
+            zone.disabled = data.phase === "dealing";
+        });
+    }
+    const draftTotalNode = shell.querySelector("[data-live-draft-total]");
+    if (draftTotalNode) draftTotalNode.textContent = chips(draftBetTotal(draft));
+    const submit = shell.querySelector("[data-live-bet-form] button[type='submit']");
+    if (submit) {
+        submit.classList.toggle("danger", Boolean(data.pending_bet) || data.phase === "dealing");
+        submit.disabled = data.phase === "dealing";
+        const total = draftBetTotal(draft);
+        submit.textContent = data.phase === "dealing" ? "Round in Progress" : (total ? `Confirm ${chips(total)}` : "Confirm Bet");
     }
     setLiveBalance(data.my_balance);
 }
@@ -1545,27 +2106,98 @@ function initLiveTables() {
         const roadGrid = shell.querySelector("[data-road-grid]");
         const form = shell.querySelector("[data-live-bet-form]");
         const resultBox = shell.querySelector("[data-live-result]");
+        const zones = shell.querySelectorAll("[data-live-wager]");
         const lastRound = { value: 0 };
+        const draft = {};
+        const draftHistory = [];
+        let latestData = null;
 
         async function loadLive() {
             const data = await getJson(`/api/live/${encodeURIComponent(game)}/state?table=${encodeURIComponent(table)}`);
-            updateLiveStatus(shell, data);
-            renderRoadGrid(roadGrid, data.history || []);
+            latestData = data;
+            updateLiveStatus(shell, data, draft);
+            renderRoadGrid(roadGrid, data.history || [], data);
             renderLiveCards(shell, data, lastRound);
         }
 
         if (form) {
+            function renderDraft() {
+                updateLiveStatus(shell, latestData || { phase: "betting", pending_bets: [], my_balance: currentBalance(), countdown: 0 }, draft);
+            }
+
+            function addDraftChip(wager) {
+                const result = addChipToTarget(draft, wager, getSelectedChip(), currentBalance());
+                if (!result.ok) {
+                    if (resultBox) resultBox.insertAdjacentHTML("afterbegin", `<div class="flash error">${escapeHtml(result.error)}</div>`);
+                    return;
+                }
+                draftHistory.push({ wager, amount: getSelectedChip() });
+                const wagerInput = form.querySelector("input[name='wager']");
+                if (wagerInput) wagerInput.value = wager;
+                renderDraft();
+            }
+
+            function undoDraftChip() {
+                const last = draftHistory.pop();
+                if (!last) return;
+                draft[last.wager] = Math.max(0, Number(draft[last.wager] || 0) - Number(last.amount || 0));
+                if (!draft[last.wager]) delete draft[last.wager];
+                renderDraft();
+            }
+
+            async function submitLiveBet() {
+                if (!draftBetTotal(draft)) {
+                    const wagerInput = form.querySelector("input[name='wager']");
+                    const amountInput = form.querySelector("input[name='bet']");
+                    const wager = wagerInput?.value;
+                    const amount = parseChips(amountInput?.value);
+                    if (wager && amount > 0) {
+                        const result = addChipToTarget(draft, wager, amount, currentBalance());
+                        if (result.ok) draftHistory.push({ wager, amount });
+                    }
+                }
+                if (!draftBetTotal(draft)) {
+                    if (resultBox) resultBox.insertAdjacentHTML("afterbegin", `<div class="flash error">Place chips on a betting spot first.</div>`);
+                    return;
+                }
+                const entries = Object.entries(draft).filter(([, amount]) => Number(amount) > 0);
+                for (const [wager, amount] of entries) {
+                    const wagerInput = form.querySelector("input[name='wager']");
+                    if (wagerInput) wagerInput.value = wager;
+                    const amountInput = form.querySelector("input[name='bet']");
+                    if (amountInput) amountInput.value = amount;
+                    const payload = Object.fromEntries(new FormData(form));
+                    payload.table = table;
+                    await postForm(`/api/live/${encodeURIComponent(game)}/bet`, payload);
+                }
+                clearDraftBets(draft);
+                draftHistory.splice(0, draftHistory.length);
+                if (resultBox) resultBox.insertAdjacentHTML("afterbegin", `<div class="flash success">Bet confirmed for next round.</div>`);
+                await loadLive();
+            }
+
             form.addEventListener("submit", async (event) => {
                 event.preventDefault();
                 try {
-                    const payload = Object.fromEntries(new FormData(form));
-                    payload.table = table;
-                    const data = await postForm(`/api/live/${encodeURIComponent(game)}/bet`, payload);
-                    updateLiveStatus(shell, data);
-                    if (resultBox) resultBox.insertAdjacentHTML("afterbegin", `<div class="flash success">Bet locked for the next countdown round.</div>`);
+                    await submitLiveBet();
                 } catch (error) {
                     if (resultBox) resultBox.insertAdjacentHTML("afterbegin", `<div class="flash error">${escapeHtml(error.message)}</div>`);
+                    await loadLive().catch(() => {});
                 }
+            });
+            zones.forEach((zone) => {
+                zone.addEventListener("click", () => addDraftChip(zone.dataset.liveWager));
+            });
+            shell.querySelector("[data-live-confirm]")?.addEventListener("click", () => {
+                form.requestSubmit();
+            });
+            shell.querySelector("[data-live-clear]")?.addEventListener("click", () => {
+                clearDraftBets(draft);
+                draftHistory.splice(0, draftHistory.length);
+                renderDraft();
+            });
+            shell.querySelector("[data-live-undo]")?.addEventListener("click", () => {
+                undoDraftChip();
             });
         }
         loadLive().catch(() => {});
@@ -1695,13 +2327,20 @@ function initSlots() {
         });
     }
     if (autoButton) {
+        let autoRunning = false;
         autoButton.addEventListener("click", async () => {
+            if (autoRunning) {
+                autoRunning = false;
+                return;
+            }
             const count = Math.max(1, Math.min(100, Number(shell.querySelector("[data-slot-auto-count]")?.value || 1)));
-            autoButton.disabled = true;
-            autoButton.textContent = "Running";
+            autoRunning = true;
+            autoButton.textContent = "Stop Auto";
+            autoButton.classList.add("danger");
             let totalNet = 0;
             let lastMultiplier = 0;
             for (let index = 0; index < count; index += 1) {
+                if (!autoRunning) break;
                 try {
                     const data = await spin("base", true);
                     totalNet += Number(data.net || 0);
@@ -1712,9 +2351,260 @@ function initSlots() {
                 }
             }
             showRoundToast({ multiplier: lastMultiplier, net: totalNet, label: totalNet >= 0 ? "Auto Win" : "Auto Loss" });
-            autoButton.disabled = false;
+            autoRunning = false;
             autoButton.textContent = "Auto Spin";
+            autoButton.classList.remove("danger");
         });
+    }
+}
+
+function initCrash() {
+    const shell = document.querySelector("[data-game='crash']");
+    if (!shell) return;
+    const form = shell.querySelector("[data-crash-form]");
+    const betButton = shell.querySelector("[data-crash-bet]");
+    const cashoutButton = shell.querySelector("[data-crash-cashout]");
+    const status = shell.querySelector("[data-crash-status]");
+    const multiplierText = shell.querySelector("[data-crash-multiplier]");
+    const historyBox = shell.querySelector("[data-crash-history]");
+    const resultBox = shell.querySelector("[data-crash-result]");
+    const canvas = shell.querySelector("[data-crash-canvas]");
+    const screen = shell.querySelector("[data-crash-screen]");
+    const bustText = shell.querySelector("[data-crash-bust]");
+    const autoButton = shell.querySelector("[data-crash-auto]");
+    const autoAmountInput = shell.querySelector("[data-crash-auto-amount]");
+    const autoTargetInput = shell.querySelector("[data-crash-auto-target]");
+    const autoRoundsInput = shell.querySelector("[data-crash-auto-rounds]");
+    const autoState = shell.querySelector("[data-crash-auto-state]");
+    const ctx = canvas?.getContext("2d");
+    let lastCrashRound = null;
+    let autoRunning = false;
+    let autoBusy = false;
+    let autoPlaced = 0;
+    let autoRounds = 0;
+    let autoTarget = 2;
+
+    function drawCrash(multiplier = 1, phase = "betting") {
+        if (!ctx || !canvas) return;
+        const width = canvas.width;
+        const height = canvas.height;
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = "#15191d";
+        ctx.fillRect(0, 0, width, height);
+        ctx.strokeStyle = "rgba(255,255,255,.08)";
+        ctx.lineWidth = 1;
+        for (let x = 0; x < width; x += 90) {
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, height);
+            ctx.stroke();
+        }
+        for (let y = 0; y < height; y += 70) {
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(width, y);
+            ctx.stroke();
+        }
+        if (phase === "betting") return;
+        const points = [];
+        const maxX = Math.min(width - 42, 80 + Math.log(Math.max(1.01, multiplier)) * 210);
+        const maxY = Math.max(42, height - 52 - Math.log(Math.max(1.01, multiplier)) * 72);
+        for (let index = 0; index <= 48; index += 1) {
+            const t = index / 48;
+            points.push({ x: 42 + (maxX - 42) * t, y: height - 42 - (height - 42 - maxY) * (t ** 1.7) });
+        }
+        ctx.strokeStyle = phase === "crashed" ? "#fe2247" : "#00e701";
+        ctx.lineWidth = 5;
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        points.forEach((point, index) => {
+            if (index === 0) ctx.moveTo(point.x, point.y);
+            else ctx.lineTo(point.x, point.y);
+        });
+        ctx.stroke();
+    }
+
+    function renderCrash(data) {
+        setLiveBalance(data.balance);
+        const active = data.active_bet;
+        const lastRound = data.last?.round || null;
+        if (lastRound && lastCrashRound === null) {
+            lastCrashRound = lastRound;
+        } else if (lastRound && lastCrashRound !== lastRound) {
+            lastCrashRound = lastRound;
+            if (screen) {
+                screen.classList.add("is-crashed");
+                if (data.phase !== "crashed") {
+                    window.setTimeout(() => screen.classList.remove("is-crashed"), 900);
+                }
+            }
+            if (bustText && data.phase === "crashed") {
+                bustText.classList.add("show");
+            }
+            if (resultBox && data.phase !== "crashed") {
+                resultBox.innerHTML = `<div class="result-banner lose"><strong>Crashed at ${Number(data.last.crash || 1).toFixed(2)}x</strong><span>Next Round opening.</span></div>`;
+            }
+        }
+        if (historyBox) {
+            historyBox.innerHTML = (data.history || []).slice(-16).reverse().map((item) => {
+                const value = Number(item.multiplier || 1);
+                return `<span class="${value >= 2 ? "hot" : ""}">${value.toFixed(2)}x</span>`;
+            }).join("");
+        }
+        if (data.phase === "betting") {
+            if (screen) screen.classList.remove("is-crashed");
+            if (bustText) bustText.classList.remove("show");
+            if (status) status.textContent = `Betting Open: ${data.countdown}s`;
+            if (multiplierText) multiplierText.textContent = `${data.countdown}s`;
+            drawCrash(1, "betting");
+        } else if (data.phase === "crashed") {
+            const value = Number(data.current?.crash || data.current?.multiplier || data.last?.crash || 1);
+            if (screen) screen.classList.add("is-crashed");
+            if (bustText) bustText.classList.add("show");
+            if (status) status.textContent = "Crashed";
+            if (multiplierText) multiplierText.textContent = `${value.toFixed(2)}x`;
+            drawCrash(value, "crashed");
+            if (resultBox) {
+                resultBox.innerHTML = `<div class="result-banner lose"><strong>Crashed at ${value.toFixed(2)}x</strong><span>Next Round opens shortly.</span></div>`;
+            }
+        } else {
+            const value = Number(data.current?.multiplier || 1);
+            if (screen) screen.classList.remove("is-crashed");
+            if (bustText) bustText.classList.remove("show");
+            if (status) status.textContent = "Round in Progress";
+            if (multiplierText) multiplierText.textContent = `${value.toFixed(2)}x`;
+            drawCrash(value, "running");
+        }
+        if (betButton) {
+            betButton.disabled = data.phase !== "betting" || Boolean(active);
+            betButton.classList.toggle("danger", Boolean(active) || data.phase !== "betting");
+            betButton.textContent = data.phase === "crashed" ? "Round Settling" : (data.phase !== "betting" ? "Round in Progress" : (active ? "Bet Locked" : "Place Bet"));
+        }
+        if (cashoutButton) {
+            cashoutButton.disabled = !(data.phase === "running" && active && !active.cashed);
+            cashoutButton.textContent = active?.cashed
+                ? `Cashed Out ${Number(active.cashout || 1).toFixed(2)}x`
+                : `Cash Out${data.current ? ` ${Number(data.current.multiplier || 1).toFixed(2)}x` : ""}`;
+        }
+        const stateText = shell.querySelector("[data-crash-bet-state]");
+        if (stateText) {
+            stateText.textContent = active
+                ? `${chips(active.bet)} ${active.cashed ? `cashed out at ${Number(active.cashout || 1).toFixed(2)}x` : "active"}`
+                : "No active bet.";
+        }
+        runCrashAuto(data).catch((error) => {
+            if (autoState) autoState.textContent = error.message;
+            stopCrashAuto();
+        });
+    }
+
+    async function refresh() {
+        const data = await getJson("/api/crash/state");
+        renderCrash(data);
+    }
+
+    function stopCrashAuto() {
+        autoRunning = false;
+        autoBusy = false;
+        if (autoButton) {
+            autoButton.textContent = "Auto Bet";
+            autoButton.classList.remove("danger");
+        }
+        if (autoState) autoState.textContent = "Auto stopped.";
+    }
+
+    async function runCrashAuto(data) {
+        if (!autoRunning || autoBusy) return;
+        const active = data.active_bet;
+        if (!active && autoPlaced >= autoRounds) {
+            stopCrashAuto();
+            return;
+        }
+        if (data.phase === "betting" && !active && autoPlaced < autoRounds) {
+            autoBusy = true;
+            try {
+                const amount = Math.max(1, parseChips(autoAmountInput?.value));
+                const payload = await postForm("/api/crash/bet", {
+                    bet: amount,
+                    client_seed: `${document.querySelector(".username")?.textContent || "auto"}-crash-auto-${Date.now()}`,
+                });
+                autoPlaced += 1;
+                if (autoState) autoState.textContent = `Auto ${autoPlaced}/${autoRounds} armed at ${Number(autoTarget).toFixed(2)}x.`;
+                renderCrash(payload);
+            } finally {
+                autoBusy = false;
+            }
+            return;
+        }
+        const liveMultiplier = Number(data.current?.multiplier || 1);
+        if (data.phase === "running" && active && !active.cashed && liveMultiplier >= autoTarget) {
+            autoBusy = true;
+            try {
+                const payload = await postForm("/api/crash/cashout");
+                if (autoState) autoState.textContent = `Cashed out at ${Number(payload.active_bet?.cashout || liveMultiplier).toFixed(2)}x.`;
+                renderCrash(payload);
+            } finally {
+                autoBusy = false;
+            }
+        }
+    }
+
+    if (form) {
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            try {
+                const data = await postForm("/api/crash/bet", Object.fromEntries(new FormData(form)));
+                renderCrash(data);
+                if (resultBox) resultBox.innerHTML = `<div class="flash success">Bet locked for next round.</div>`;
+            } catch (error) {
+                if (resultBox) resultBox.innerHTML = `<div class="flash error">${escapeHtml(error.message)}</div>`;
+            }
+        });
+    }
+    if (cashoutButton) {
+        cashoutButton.addEventListener("click", async () => {
+            try {
+                const data = await postForm("/api/crash/cashout");
+                renderCrash(data);
+                if (resultBox) resultBox.innerHTML = `<div class="result-banner win"><strong>Cashed Out</strong><span>${cashoutButton.textContent}</span></div>`;
+                showRoundToast({ multiplier: data.active_bet?.cashout || data.current?.multiplier || 1, net: Number(data.active_bet?.payout || 0) - Number(data.active_bet?.bet || 0), label: "Win" });
+            } catch (error) {
+                if (resultBox) resultBox.innerHTML = `<div class="flash error">${escapeHtml(error.message)}</div>`;
+            }
+        });
+    }
+    if (autoButton) {
+        autoButton.addEventListener("click", () => {
+            if (autoRunning) {
+                stopCrashAuto();
+                return;
+            }
+            autoTarget = Math.max(1.01, Number(autoTargetInput?.value || 2));
+            autoRounds = Math.max(1, Math.min(100, Number(autoRoundsInput?.value || 1)));
+            autoPlaced = 0;
+            autoRunning = true;
+            autoButton.textContent = "Stop Auto";
+            autoButton.classList.add("danger");
+            if (autoState) autoState.textContent = `Waiting for betting window: 0/${autoRounds}.`;
+        });
+    }
+    if (window.EventSource) {
+        const source = new EventSource("/api/crash/stream");
+        source.onmessage = (event) => {
+            try {
+                renderCrash(JSON.parse(event.data));
+            } catch (_error) {
+                // Ignore partial stream frames.
+            }
+        };
+        source.onerror = () => {
+            source.close();
+            refresh().catch(() => {});
+            setInterval(() => refresh().catch(() => {}), 120);
+        };
+    } else {
+        refresh().catch(() => {});
+        setInterval(() => refresh().catch(() => {}), 120);
     }
 }
 
@@ -1734,17 +2624,188 @@ function initRaindrops() {
     });
 }
 
+function initChickenCross() {
+    const shell = document.querySelector("[data-game='chicken']");
+    if (!shell) return;
+    const form = shell.querySelector("[data-chicken-form]");
+    const scene = shell.querySelector("[data-chicken-scene]");
+    const lanesBox = shell.querySelector("[data-chicken-lanes]");
+    const chicken = shell.querySelector("[data-chicken-character]");
+    const startButton = shell.querySelector("[data-chicken-start]");
+    const stepButton = shell.querySelector("[data-chicken-step]");
+    const cashoutButton = shell.querySelector("[data-chicken-cashout]");
+    const stateText = shell.querySelector("[data-chicken-state]");
+    const resultBox = shell.querySelector("[data-chicken-result]");
+    const fairBox = shell.querySelector("[data-chicken-fair]");
+    const currentNode = shell.querySelector("[data-chicken-current]");
+    const nextNode = shell.querySelector("[data-chicken-next]");
+    const payoutNode = shell.querySelector("[data-chicken-payout]");
+    const laneNode = shell.querySelector("[data-chicken-lane]");
+    let latest = null;
+    let busy = false;
+    let renderedLaneCount = 0;
+
+    function laneHtml(index) {
+        const direction = index % 2 === 0 ? "right" : "left";
+        const speed = 5.6 - (index % 4) * 0.55;
+        return `
+            <div class="chicken-lane lane-${direction}" data-lane="${index}" style="--lane:${index}">
+                <span class="lane-mark"></span>
+                <span class="lane-crosswalk"></span>
+                <span class="traffic-car ${direction}" style="--car-speed:${speed}s; --car-delay:-${(index * 0.73).toFixed(2)}s"></span>
+                <span class="traffic-car small ${direction}" style="--car-speed:${(speed + 1.15).toFixed(2)}s; --car-delay:-${(index * 1.11).toFixed(2)}s"></span>
+                <span class="event-car ${direction}"></span>
+                <span class="safe-barrier"></span>
+                <span class="impact-sparks"></span>
+            </div>
+        `;
+    }
+
+    function ensureLanes(count) {
+        if (!lanesBox || renderedLaneCount === count) return;
+        renderedLaneCount = count;
+        lanesBox.innerHTML = Array.from({ length: count }, (_, index) => laneHtml(count - index)).join("");
+        scene?.style.setProperty("--lane-count", count);
+    }
+
+    function setBusy(nextBusy) {
+        busy = nextBusy;
+        const active = latest?.status === "active";
+        if (startButton) startButton.disabled = busy || active;
+        if (stepButton) stepButton.disabled = busy || !active;
+        if (cashoutButton) cashoutButton.disabled = busy || !active || Number(latest?.step || 0) <= 0;
+    }
+
+    function markLane(type, step) {
+        shell.querySelectorAll(".chicken-lane").forEach((lane) => lane.classList.remove("active-lane", "safe-hit", "crash-hit"));
+        const lane = shell.querySelector(`.chicken-lane[data-lane='${step}']`);
+        if (lane) {
+            lane.classList.add("active-lane", type === "crash" ? "crash-hit" : "safe-hit");
+            window.setTimeout(() => lane.classList.remove("active-lane", "safe-hit", "crash-hit"), type === "crash" ? 1250 : 1150);
+        }
+    }
+
+    function render(data, event = null) {
+        latest = data;
+        ensureLanes(Number(data.max_steps || 10));
+        const movingEvent = event && ["safe", "complete", "crash"].includes(event.type);
+        const visualStep = movingEvent ? Number(event.from || 0) : Number(data.step || 0);
+        scene?.style.setProperty("--chicken-step", visualStep);
+        setLiveBalance(data.balance);
+        if (currentNode) currentNode.textContent = `${Number(data.multiplier || 1).toFixed(2)}x`;
+        if (nextNode) nextNode.textContent = `${Number(data.next_multiplier || 1).toFixed(2)}x`;
+        if (payoutNode) payoutNode.textContent = chips(data.potential_payout || 0);
+        if (laneNode) laneNode.textContent = `${chips(data.step || 0)} / ${chips(data.max_steps || 0)}`;
+        if (fairBox) fairBox.innerHTML = fairProofHtml(data.last?.fair || data.pending);
+        if (stateText) {
+            if (data.status === "active") {
+                stateText.textContent = `${escapeHtml(data.difficulty_label)} crossing active. Next safe lane pays ${chips(data.next_payout)}.`;
+            } else if (data.last) {
+                const label = data.last.result === "cashout" ? "Cashed Out" : data.last.result === "crash" ? "Impact" : "Crossed";
+                stateText.textContent = `${label} / ${signedChips(data.last.net)} chips.`;
+            } else {
+                stateText.textContent = "Set your bet and choose a difficulty.";
+            }
+        }
+        if (resultBox && data.last) {
+            const win = Number(data.last.net || 0) > 0;
+            const label = data.last.result === "cashout" ? "Cashed Out" : data.last.result === "crash" ? "Impact" : "Crossed";
+            resultBox.innerHTML = `
+                <div class="result-banner ${win ? "win" : "lose"}">
+                    <strong>${label} ${Number(data.last.multiplier || 0).toFixed(2)}x</strong>
+                    <span>${signedChips(data.last.net)} chips</span>
+                </div>
+            `;
+        } else if (resultBox && data.status === "active") {
+            resultBox.innerHTML = "";
+        }
+        if (chicken && event) {
+            chicken.classList.remove("is-hopping", "is-safe", "is-crashed", "is-celebrating");
+            void chicken.offsetWidth;
+            if (event.type === "safe" || event.type === "complete") {
+                const target = Number(event.to || data.step || 0);
+                chicken.classList.add("is-hopping");
+                window.setTimeout(() => scene?.style.setProperty("--chicken-step", target), 40);
+                window.setTimeout(() => {
+                    chicken.classList.remove("is-hopping");
+                    chicken.classList.add(event.type === "complete" ? "is-celebrating" : "is-safe");
+                    markLane("safe", target);
+                }, 560);
+            }
+            if (event.type === "crash") {
+                const target = Number(event.to || (Number(data.step || 0) + 1));
+                chicken.classList.add("is-hopping");
+                window.setTimeout(() => scene?.style.setProperty("--chicken-step", target), 40);
+                window.setTimeout(() => {
+                    chicken.classList.remove("is-hopping");
+                    markLane("crash", target);
+                    window.setTimeout(() => chicken.classList.add("is-crashed"), 560);
+                }, 560);
+            }
+            if (event.type === "cashout") {
+                chicken.classList.add("is-celebrating");
+            }
+        }
+        if (!event) setBusy(false);
+    }
+
+    async function refresh() {
+        const data = await getJson("/api/chicken/state");
+        render(data);
+    }
+
+    async function withAnimationLock(action) {
+        if (busy) return;
+        setBusy(true);
+        try {
+            const data = await action();
+            const event = data.last_event || null;
+            render(data, event);
+            const delay = event?.type === "crash" ? 1500 : (event?.type === "safe" || event?.type === "complete" ? 1250 : 640);
+            window.setTimeout(() => {
+                setBusy(false);
+                if (data.last) {
+                    showRoundToast({
+                        multiplier: data.last.multiplier || data.multiplier || 0,
+                        net: data.last.net || 0,
+                        label: Number(data.last.net || 0) > 0 ? "Win" : "Loss",
+                    });
+                    if (window.refreshStatsGraph) window.refreshStatsGraph();
+                }
+            }, delay);
+        } catch (error) {
+            setBusy(false);
+            if (resultBox) resultBox.innerHTML = `<div class="flash error">${escapeHtml(error.message)}</div>`;
+        }
+    }
+
+    form?.addEventListener("submit", (event) => {
+        event.preventDefault();
+        withAnimationLock(async () => postForm("/api/chicken/start", Object.fromEntries(new FormData(form))));
+    });
+    stepButton?.addEventListener("click", () => {
+        withAnimationLock(async () => postForm("/api/chicken/step"));
+    });
+    cashoutButton?.addEventListener("click", () => {
+        withAnimationLock(async () => postForm("/api/chicken/cashout"));
+    });
+    refresh().catch(() => {});
+}
+
 document.addEventListener("DOMContentLoaded", () => {
     initBalancePolling();
     initRouletteBoard();
     initPlinko();
     initStatsModal();
+    initFairnessModal();
     initChat();
     initLimboAuto();
     initMines();
     initLiveTables();
     initRoads();
     initRaindrops();
+    initCrash();
+    initChipBetting(document);
     deferCardResults(document);
     initRoundToasts();
     const shell = document.querySelector("[data-game]");
@@ -1752,4 +2813,5 @@ document.addEventListener("DOMContentLoaded", () => {
     if (shell.dataset.game === "blackjack") initBlackjack();
     if (shell.dataset.game === "holdem") initHoldem();
     if (shell.dataset.game === "slots") initSlots();
+    if (shell.dataset.game === "chicken") initChickenCross();
 });

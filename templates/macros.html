@@ -15,27 +15,8 @@
 
 {% macro fair_box(fair) %}
     {% if fair %}
-        <div class="fair-box">
-            <div>
-                <span>Round</span>
-                <strong>{{ fair.id }}</strong>
-            </div>
-            <div>
-                <span>Server hash</span>
-                <code>{{ fair.server_seed_hash }}</code>
-            </div>
-            <div>
-                <span>Server seed</span>
-                <code>{{ fair.server_seed }}</code>
-            </div>
-            <div>
-                <span>Client seed</span>
-                <code>{{ fair.client_seed }}</code>
-            </div>
-            <div>
-                <span>Nonce</span>
-                <code>{{ fair.nonce }}</code>
-            </div>
+        <div class="fair-launch" data-card-result>
+            <button class="button ghost small" type="button" data-fair-open data-fair-payload="{{ fair|tojson|forceescape }}">Fairness</button>
         </div>
     {% endif %}
 {% endmacro %}

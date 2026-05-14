@@ -9,14 +9,14 @@
         <div class="table-header">
             <div>
                 <div class="section-kicker">Mines</div>
-                <h1>Gems and bombs</h1>
+                <h1>Reveal Gems</h1>
             </div>
             <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
         </div>
 
         <div class="mines-status" data-mines-status>
             <div><span>Multiplier</span><strong>{{ '%.4g'|format(state.multiplier) }}x</strong></div>
-            <div><span>Cashout</span><strong>{{ format_chips(state.cashout) }}</strong></div>
+            <div><span>Cash Out</span><strong>{{ format_chips(state.cashout) }}</strong></div>
             <div>
                 <span>Next Tile</span>
                 <strong>
@@ -67,10 +67,10 @@
                 <span class="range-value"><strong data-mines-count-label>{{ state.mine_count }}</strong> mines</span>
             </label>
             <label>
-                Client seed
+                Client Seed
                 <input name="client_seed" value="{{ current_user.username }}-mines">
             </label>
-            <button class="button primary" type="submit">Bet</button>
+            <button class="button primary" type="submit">Start Round</button>
         </form>
 
         <div class="stacked-form tight mines-active-controls" data-mines-controls>
@@ -88,7 +88,7 @@
                 Picks
                 <input type="number" min="1" max="24" value="3" data-mines-auto-picks>
             </label>
-            <button class="button ghost" type="button" data-mines-auto>Auto Random</button>
+            <button class="button ghost" type="button" data-mines-auto>Auto Pick</button>
         </div>
     </aside>
 </section>

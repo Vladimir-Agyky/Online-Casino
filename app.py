@@ -6,11 +6,13 @@ import os
 import random
 import secrets
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from functools import wraps
 
 from flask import (
     Flask,
+    Response,
     flash,
     g,
     jsonify,
@@ -18,6 +20,7 @@ from flask import (
     render_template,
     request,
     session,
+    stream_with_context,
     url_for,
 )
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -40,6 +43,10 @@ MINES_GRID_SIZE = 25
 MINES_RTP = 0.99
 TABLE_CHOICES = [1, 2, 3]
 LIVE_ROUND_SECONDS = 10
+LIVE_DEAL_SECONDS = 4
+CRASH_BETTING_SECONDS = 20
+CRASH_RESULT_HOLD_SECONDS = 3
+LIVE_SHOE_ROUNDS = {"baccarat": 70, "dragon_tiger": 160}
 RED_ROULETTE = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
 BLACK_ROULETTE = {n for n in range(1, 37)} - RED_ROULETTE
 ROULETTE_WHEEL_ORDER = [
@@ -136,15 +143,23 @@ SLOT_SYMBOLS = [
 ]
 SLOT_BONUS_SPINS = 10
 SLOT_BONUS_COST_MULTIPLIER = 35
+CHICKEN_DIFFICULTIES = {
+    "easy": {"label": "Easy", "survival": 0.88, "edge": 0.97, "steps": 10},
+    "medium": {"label": "Medium", "survival": 0.76, "edge": 0.96, "steps": 10},
+    "hard": {"label": "Hard", "survival": 0.64, "edge": 0.95, "steps": 11},
+    "expert": {"label": "Expert", "survival": 0.54, "edge": 0.94, "steps": 12},
+}
 GAME_STATS_ENDPOINTS = {
     "baccarat": ("baccarat", "Baccarat"),
     "dragon_tiger": ("dragon_tiger", "Dragon Tiger"),
     "roulette": ("roulette", "Roulette"),
     "limbo": ("limbo", "Limbo"),
+    "crash": ("crash", "Crash"),
     "plinko": ("plinko", "Plinko"),
     "mines": ("mines", "Mines"),
     "hilo": ("hilo", "Hi-Lo"),
     "slots": ("slots", "Slots"),
+    "chicken_cross": ("chicken_cross", "Chicken Cross"),
     "blackjack": ("blackjack", "Blackjack"),
     "holdem": ("holdem", "Texas Hold'em"),
 }
@@ -153,10 +168,12 @@ GAME_NAME_SLUGS = {
     "Dragon Tiger": "dragon_tiger",
     "Roulette": "roulette",
     "Limbo": "limbo",
+    "Crash": "crash",
     "Plinko": "plinko",
     "Mines": "mines",
     "Hi-Lo": "hilo",
     "Slots": "slots",
+    "Chicken Cross": "chicken_cross",
     "Blackjack": "blackjack",
     "Texas Hold'em": "holdem",
 }
@@ -404,7 +421,7 @@ def profit_rounds_for_user(user_id, game_filter=None):
 
 def debit_or_error(user_id, amount, reason):
     if get_balance(user_id) < amount:
-        return "Not enough fake chips for that bet."
+        return "Insufficient balance for this bet."
     change_balance(user_id, -amount, reason)
     return None
 
@@ -550,18 +567,14 @@ def format_multiplier(value):
 def plinko_multipliers(rows, risk):
     center = rows / 2
     power = PLINKO_RISK_SHAPE[risk]
-    edge_boost = PLINKO_EDGE_BOOST[risk]
-    floor = PLINKO_MIN_MULTIPLIER[risk]
-    raw = []
+    floor, edge = PLINKO_RANGES[risk][rows]
+    multipliers = []
     for slot in range(rows + 1):
         distance = abs(slot - center) / center
-        raw.append(floor + edge_boost * (distance**power))
-    expected = sum(math.comb(rows, slot) * raw[slot] for slot in range(rows + 1)) / (2**rows)
-    scale = PLINKO_TARGET_RTP[risk] / expected
-    multipliers = []
-    for value in raw:
-        scaled = max(floor, value * scale)
-        multipliers.append(round(scaled, 2))
+        value = floor + (edge - floor) * (distance**power)
+        multipliers.append(round(value, 2))
+    multipliers[0] = edge
+    multipliers[-1] = edge
     return multipliers
 
 
@@ -681,8 +694,12 @@ def road_state_name(game, table=None):
     return f"road:{game}:table:{selected}"
 
 
+def default_road_state(shoe_number=1):
+    return {"history": [], "shoe_number": int(shoe_number or 1)}
+
+
 def add_road_result(game, winner, table=None):
-    state = get_state(road_state_name(game, table), lambda: {"history": []})
+    state = get_state(road_state_name(game, table), default_road_state)
     state.setdefault("history", []).append({"winner": winner, "created_at": utc_now()})
     state["history"] = state["history"][-90:]
     set_state(road_state_name(game, table), state)
@@ -690,7 +707,11 @@ def add_road_result(game, winner, table=None):
 
 
 def road_history(game, table=None):
-    return get_state(road_state_name(game, table), lambda: {"history": []}).get("history", [])
+    return get_state(road_state_name(game, table), default_road_state).get("history", [])
+
+
+def reset_road_history(game, table, shoe_number):
+    set_state(road_state_name(game, table), default_road_state(shoe_number))
 
 
 def selected_table_from_request():
@@ -708,10 +729,28 @@ def default_live_table_state(game, table):
         "game": game,
         "table": table,
         "round": 0,
+        "shoe_number": 1,
+        "shoe_round": 0,
+        "shoe_reset_pending": False,
+        "shoe_notice": None,
+        "shoe_notice_until": None,
         "next_deal_at": utc_in(LIVE_ROUND_SECONDS),
+        "dealing_until": None,
         "current": None,
         "bets": {},
     }
+
+
+def live_shoe_limit(game):
+    return LIVE_SHOE_ROUNDS.get(game, 90)
+
+
+def ensure_live_shoe_fields(state):
+    state.setdefault("shoe_number", 1)
+    state.setdefault("shoe_round", 0)
+    state.setdefault("shoe_reset_pending", False)
+    state.setdefault("shoe_notice", None)
+    state.setdefault("shoe_notice_until", None)
 
 
 def deal_baccarat_cards(rng):
@@ -801,21 +840,33 @@ def live_table_state(game, table):
 
 def advance_live_table(game, table):
     state = live_table_state(game, table)
+    ensure_live_shoe_fields(state)
     changed = False
     now = datetime.utcnow()
-    steps = 0
-    while utc_from_iso(state.get("next_deal_at")) <= now and steps < 12:
+    if state.get("dealing_until") and utc_from_iso(state.get("dealing_until")) > now:
+        return state
+    if state.get("shoe_reset_pending"):
+        state["shoe_number"] = int(state.get("shoe_number") or 1) + 1
+        state["shoe_round"] = 0
+        state["shoe_reset_pending"] = False
+        state["shoe_notice"] = f"Shoe {state['shoe_number']} starting"
+        state["shoe_notice_until"] = utc_in(4)
+        state["next_deal_at"] = utc_in(LIVE_ROUND_SECONDS)
+        reset_road_history(game, table, state["shoe_number"])
+        changed = True
+    if utc_from_iso(state.get("next_deal_at")) <= now:
         bets = state.get("bets", {})
         seed_parts = [
-            f"{uid}:{bet['username']}:{bet['wager']}:{bet['bet']}:{bet.get('client_seed') or ''}"
-            for uid, bet in sorted(bets.items())
+            f"{bet.get('user_id', bet_id)}:{bet['username']}:{bet['wager']}:{bet['bet']}:{bet.get('client_seed') or ''}"
+            for bet_id, bet in sorted(bets.items())
         ]
         client_seed = "|".join(seed_parts) if seed_parts else f"table-{table}-{state.get('round', 0) + 1}"
         ctx = begin_fair(game, client_seed)
         dealt = deal_baccarat_cards(ctx["rng"]) if game == "baccarat" else deal_dragon_tiger_cards(ctx["rng"])
         winner = dealt["winner"]
         settlements = []
-        for uid, bet_info in bets.items():
+        for bet_id, bet_info in bets.items():
+            uid = str(bet_info.get("user_id", bet_id))
             bet = int(bet_info["bet"])
             payout = live_round_payout(game, bet_info["wager"], winner, bet)
             net = payout - bet
@@ -854,20 +905,22 @@ def advance_live_table(game, table):
             result_payload.update({"dragon": card_label(dealt["dragon"]), "tiger": card_label(dealt["tiger"])})
         fair = finish_fair(game, ctx["pending"], ctx["client_seed"], result_payload)
         state["round"] = int(state.get("round", 0)) + 1
+        state["shoe_round"] = int(state.get("shoe_round") or 0) + 1
         state["current"] = {
             **dealt,
             "round": state["round"],
+            "shoe_number": state["shoe_number"],
+            "shoe_round": state["shoe_round"],
             "settlements": settlements,
             "fair": fair,
             "created_at": utc_now(),
         }
         state["bets"] = {}
         add_road_result(game, winner, table)
-        state["next_deal_at"] = (utc_from_iso(state.get("next_deal_at")) + timedelta(seconds=LIVE_ROUND_SECONDS)).isoformat(timespec="seconds") + "Z"
-        changed = True
-        steps += 1
-    if utc_from_iso(state.get("next_deal_at")) <= now:
-        state["next_deal_at"] = utc_in(LIVE_ROUND_SECONDS)
+        if state["shoe_round"] >= live_shoe_limit(game):
+            state["shoe_reset_pending"] = True
+        state["dealing_until"] = utc_in(LIVE_DEAL_SECONDS)
+        state["next_deal_at"] = (datetime.utcnow() + timedelta(seconds=LIVE_DEAL_SECONDS + LIVE_ROUND_SECONDS)).isoformat(timespec="seconds") + "Z"
         changed = True
     if changed:
         set_state(live_table_key(game, table), state)
@@ -877,17 +930,35 @@ def advance_live_table(game, table):
 
 def live_public_state(game, table, user_id):
     state = advance_live_table(game, table)
+    ensure_live_shoe_fields(state)
     current = state.get("current")
-    pending_bet = (state.get("bets") or {}).get(str(user_id))
-    countdown = max(0, int((utc_from_iso(state.get("next_deal_at")) - datetime.utcnow()).total_seconds()))
+    now = datetime.utcnow()
+    phase = "dealing" if state.get("dealing_until") and utc_from_iso(state.get("dealing_until")) > now else "betting"
+    pending_bets = [
+        bet
+        for bet_id, bet in (state.get("bets") or {}).items()
+        if str(bet.get("user_id", bet_id)) == str(user_id)
+    ]
+    pending_bet = {
+        "bet": sum(int(item.get("bet") or 0) for item in pending_bets),
+        "wager": ", ".join(item.get("wager", "") for item in pending_bets),
+    } if pending_bets else None
+    countdown = 0 if phase == "dealing" else max(0, int((utc_from_iso(state.get("next_deal_at")) - now).total_seconds()))
     return {
         "game": game,
         "table": table,
         "round": state.get("round", 0),
+        "shoe_number": state.get("shoe_number", 1),
+        "shoe_round": state.get("shoe_round", 0),
+        "shoe_limit": live_shoe_limit(game),
+        "shoe_reset_pending": bool(state.get("shoe_reset_pending")),
+        "shoe_notice": state.get("shoe_notice") if state.get("shoe_notice_until") and utc_from_iso(state.get("shoe_notice_until")) > now else None,
+        "phase": phase,
         "countdown": countdown,
         "next_deal_at": state.get("next_deal_at"),
-        "current": current,
+        "current": current if phase == "dealing" else None,
         "pending_bet": pending_bet,
+        "pending_bets": pending_bets,
         "history": road_history(game, table),
         "my_balance": get_balance(user_id),
         "me": str(user_id),
@@ -896,15 +967,16 @@ def live_public_state(game, table, user_id):
 
 def place_live_table_bet(game, table, user_id, username, bet, wager, client_seed):
     state = advance_live_table(game, table)
-    if str(user_id) in state.get("bets", {}):
-        return None, "You already have a bet locked for the next round."
+    if state.get("dealing_until") and utc_from_iso(state.get("dealing_until")) > datetime.utcnow():
+        return None, "Round in progress. Betting opens after this deal."
     if max(0, int((utc_from_iso(state.get("next_deal_at")) - datetime.utcnow()).total_seconds())) <= 0:
         state = advance_live_table(game, table)
     error = debit_or_error(user_id, bet, f"{'Baccarat' if game == 'baccarat' else 'Dragon Tiger'} bet")
     if error:
         get_db().commit()
         return None, error
-    state.setdefault("bets", {})[str(user_id)] = {
+    state.setdefault("bets", {})[secrets.token_hex(6)] = {
+        "user_id": str(user_id),
         "username": username,
         "bet": bet,
         "wager": wager,
@@ -942,7 +1014,8 @@ def table_summaries(game):
                 }
             )
         elif game in {"baccarat", "dragon_tiger"}:
-            advance_live_table(game, number)
+            state = advance_live_table(game, number)
+            ensure_live_shoe_fields(state)
             history = road_history(game, number)
             rows.append(
                 {
@@ -950,6 +1023,8 @@ def table_summaries(game):
                     "players": 0,
                     "capacity": None,
                     "phase": "live shoe",
+                    "shoe_number": state.get("shoe_number", 1),
+                    "shoe_round": state.get("shoe_round", 0),
                     "shoe": history[-12:],
                 }
             )
@@ -980,17 +1055,17 @@ def settle_raindrops():
             share = amount // len(joined)
             paid_total = share * len(joined)
             for joined_user in joined:
-                change_balance(int(joined_user["id"]), share, "Raindrop received")
+                change_balance(int(joined_user["id"]), share, "Rain received")
             event["status"] = "paid"
             event["share"] = share
             event["paid_total"] = paid_total
-            message = f"{event['creator_name']}'s raindrop paid {format_chips(share)} chips each to {len(joined)} players."
+            message = f"{event['creator_name']}'s rain paid {format_chips(share)} chips each to {len(joined)} players."
             get_db().execute(
                 "INSERT INTO chat_messages (user_id, username, message, created_at) VALUES (?, ?, ?, ?)",
-                (event["creator_id"], "Raindrop", message, utc_now()),
+                (event["creator_id"], "Rain", message, utc_now()),
             )
         else:
-            change_balance(int(event["creator_id"]), amount, "Raindrop refunded")
+            change_balance(int(event["creator_id"]), amount, "Rain refunded")
             event["status"] = "refunded"
             event["share"] = 0
             event["paid_total"] = 0
@@ -1011,16 +1086,18 @@ def open_raindrops():
 @login_required
 def lobby():
     games = [
-        ("Texas Hold'em", "holdem", "Shared poker table with live polling."),
-        ("Blackjack", "blackjack", "Dealer table for up to five players."),
-        ("Baccarat", "baccarat", "Player, banker, and tie betting."),
-        ("Dragon Tiger", "dragon_tiger", "One-card showdown."),
-        ("Roulette", "roulette", "European wheel with inside and outside bets."),
-        ("Limbo", "limbo", "Multiplier chase with hash-based results."),
-        ("Plinko", "plinko", "Peg board with rows, risk, and edge multipliers."),
-        ("Mines", "mines", "Twenty-five tiles, gems, bombs, and cashouts."),
-        ("Slots", "slots", "Buy spins, chase features, and roll for a fake jackpot."),
-        ("Hi-Lo", "hilo", "Call the next card higher or lower."),
+        ("Texas Hold'em", "holdem", "Classic poker table with shared community cards."),
+        ("Blackjack", "blackjack", "Beat the dealer without going over 21."),
+        ("Baccarat", "baccarat", "Bet on Player, Banker, or Tie."),
+        ("Dragon Tiger", "dragon_tiger", "One card each. Highest card wins."),
+        ("Roulette", "roulette", "Pick your numbers and spin the wheel."),
+        ("Limbo", "limbo", "Set your target and chase the multiplier."),
+        ("Crash", "crash", "Cash out before the multiplier crashes."),
+        ("Plinko", "plinko", "Drop the ball and hit a multiplier."),
+        ("Mines", "mines", "Reveal gems and avoid the bombs."),
+        ("Slots", "slots", "Spin the reels and chase the feature."),
+        ("Chicken Cross", "chicken_cross", "Cross the road, build the multiplier, cash out before impact."),
+        ("Hi-Lo", "hilo", "Guess higher or lower on the next card."),
     ]
     recent = get_db().execute(
         "SELECT * FROM fair_rounds ORDER BY created_at DESC LIMIT 6"
@@ -1192,7 +1269,7 @@ def api_raindrop():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     if get_balance(g.user["id"]) < amount:
-        return jsonify({"error": "Not enough fake chips for that raindrop."}), 400
+        return jsonify({"error": "Insufficient balance for this rain."}), 400
     rows = get_db().execute(
         """
         SELECT id, username
@@ -1204,20 +1281,20 @@ def api_raindrop():
         (g.user["id"], count),
     ).fetchall()
     if not rows:
-        return jsonify({"error": "There are no other enabled users to receive the raindrop."}), 400
+        return jsonify({"error": "No eligible players are available for this rain."}), 400
     share = amount // len(rows)
     if share <= 0:
         return jsonify({"error": "Increase the amount so every receiver gets at least 1 chip."}), 400
     total = share * len(rows)
-    change_balance(g.user["id"], -total, "Raindrop sent")
+    change_balance(g.user["id"], -total, "Rain sent")
     recipients = []
     for row in rows:
-        change_balance(row["id"], share, "Raindrop received")
+        change_balance(row["id"], share, "Rain received")
         recipients.append(row["username"])
     message = f"{g.user['username']} made it rain {format_chips(total)} chips: {format_chips(share)} each to {', '.join(recipients)}"
     get_db().execute(
         "INSERT INTO chat_messages (user_id, username, message, created_at) VALUES (?, ?, ?, ?)",
-        (g.user["id"], "Raindrop", message, utc_now()),
+        (g.user["id"], "Rain", message, utc_now()),
     )
     get_db().commit()
     return jsonify({"amount": total, "share": share, "recipients": recipients, "balance": get_balance(g.user["id"])})
@@ -1233,7 +1310,7 @@ def raindrops():
         except ValueError as exc:
             flash(str(exc), "error")
             return redirect(url_for("raindrops"))
-        error = debit_or_error(g.user["id"], amount, "Raindrop sent")
+        error = debit_or_error(g.user["id"], amount, "Rain sent")
         if error:
             flash(error, "error")
             get_db().commit()
@@ -1254,10 +1331,10 @@ def raindrops():
         save_raindrop_state(state)
         get_db().execute(
             "INSERT INTO chat_messages (user_id, username, message, created_at) VALUES (?, ?, ?, ?)",
-            (g.user["id"], "Raindrop", f"{g.user['username']} opened a {format_chips(amount)} chip raindrop. Join from the Raindrop tab.", utc_now()),
+            (g.user["id"], "Rain", f"{g.user['username']} opened a {format_chips(amount)} chip rain. Join from the Rain tab.", utc_now()),
         )
         get_db().commit()
-        flash("Raindrop scheduled. It pays only to players who join before the timer ends.", "success")
+        flash("Rain scheduled. Players must join before the timer ends.", "success")
         return redirect(url_for("raindrops"))
     return render_template("raindrops.html", events=reversed(settle_raindrops().get("events", [])))
 
@@ -1270,17 +1347,17 @@ def api_raindrop_join(event_id):
         if event.get("id") != event_id:
             continue
         if event.get("status") != "open":
-            return jsonify({"error": "That raindrop is already closed."}), 400
+            return jsonify({"error": "That rain is already closed."}), 400
         if int(event["creator_id"]) == int(g.user["id"]):
-            return jsonify({"error": "You cannot join your own raindrop."}), 400
+            return jsonify({"error": "You cannot join your own rain."}), 400
         joined = event.setdefault("joined", [])
         if any(int(item["id"]) == int(g.user["id"]) for item in joined):
-            return jsonify({"error": "You already joined this raindrop."}), 400
+            return jsonify({"error": "You already joined this rain."}), 400
         joined.append({"id": g.user["id"], "username": g.user["username"], "joined_at": utc_now()})
         save_raindrop_state(state)
         get_db().commit()
         return jsonify({"event": event, "joined": len(joined)})
-    return jsonify({"error": "Raindrop not found."}), 404
+    return jsonify({"error": "Rain event not found."}), 404
 
 
 @app.route("/api/profit-loss")
@@ -1430,8 +1507,17 @@ def api_roads(game):
     if game not in {"baccarat", "dragon_tiger"}:
         return jsonify({"error": "Unknown road game."}), 404
     selected_table = road_table_number()
-    advance_live_table(game, selected_table)
-    return jsonify({"history": road_history(game, selected_table), "table": selected_table})
+    state = advance_live_table(game, selected_table)
+    ensure_live_shoe_fields(state)
+    return jsonify(
+        {
+            "history": road_history(game, selected_table),
+            "table": selected_table,
+            "shoe_number": state.get("shoe_number", 1),
+            "shoe_round": state.get("shoe_round", 0),
+            "shoe_limit": live_shoe_limit(game),
+        }
+    )
 
 
 @app.route("/api/live/<game>/state")
@@ -1485,17 +1571,72 @@ def api_dragon_no_bet():
     return jsonify(live_public_state("dragon_tiger", selected_table, g.user["id"]))
 
 
+ROULETTE_NUMBER_ODDS = {1: 35, 2: 17, 3: 11, 4: 8, 6: 5, 12: 2, 18: 1}
+
+
+def roulette_evaluate_numbers(numbers, number):
+    numbers = sorted({int(item) for item in numbers})
+    odds = ROULETTE_NUMBER_ODDS.get(len(numbers))
+    if not odds:
+        return False, 0
+    return number in numbers, odds
+
+
+def roulette_evaluate_bet(bet_type, chosen_number, number):
+    win = False
+    odds = 1
+    if bet_type == "red":
+        win = number in RED_ROULETTE
+    elif bet_type == "black":
+        win = number in BLACK_ROULETTE
+    elif bet_type == "odd":
+        win = number != 0 and number % 2 == 1
+    elif bet_type == "even":
+        win = number != 0 and number % 2 == 0
+    elif bet_type == "low":
+        win = 1 <= number <= 18
+    elif bet_type == "high":
+        win = 19 <= number <= 36
+    elif bet_type == "dozen1":
+        win = 1 <= number <= 12
+        odds = 2
+    elif bet_type == "dozen2":
+        win = 13 <= number <= 24
+        odds = 2
+    elif bet_type == "dozen3":
+        win = 25 <= number <= 36
+        odds = 2
+    elif bet_type == "column1":
+        win = number != 0 and number % 3 == 1
+        odds = 2
+    elif bet_type == "column2":
+        win = number != 0 and number % 3 == 2
+        odds = 2
+    elif bet_type == "column3":
+        win = number != 0 and number % 3 == 0
+        odds = 2
+    elif bet_type == "number":
+        win = number == chosen_number
+        odds = 35
+    return win, odds
+
+
+def roulette_selection_label(selection):
+    if selection.get("label"):
+        return str(selection["label"])[:48]
+    numbers = selection.get("numbers")
+    if numbers:
+        return "-".join(str(number) for number in numbers)
+    if selection.get("bet_type") == "number":
+        return f"#{selection.get('chosen_number')}"
+    return str(selection.get("bet_type", "bet")).replace("_", " ").title()
+
+
 @app.route("/roulette", methods=["GET", "POST"])
 @login_required
 def roulette():
     result = None
     if request.method == "POST":
-        try:
-            bet = parse_positive_int(request.form.get("bet"))
-        except ValueError as exc:
-            flash(str(exc), "error")
-            return redirect(url_for("roulette"))
-        bet_type = request.form.get("bet_type")
         allowed = {
             "red",
             "black",
@@ -1511,17 +1652,79 @@ def roulette():
             "column3",
             "number",
         }
-        if bet_type not in allowed:
-            flash("Choose a roulette bet.", "error")
-            return redirect(url_for("roulette"))
-        chosen_number = None
-        if bet_type == "number":
+        selections = []
+        raw_multi = request.form.get("multi_bets", "").strip()
+        if raw_multi:
             try:
-                chosen_number = parse_positive_int(request.form.get("number"), minimum=0, maximum=36)
+                decoded = json.loads(raw_multi)
+            except json.JSONDecodeError:
+                decoded = []
+            for item in decoded:
+                numbers = item.get("numbers")
+                if isinstance(numbers, list):
+                    try:
+                        cleaned = sorted({parse_positive_int(value, minimum=0, maximum=36) for value in numbers})
+                    except ValueError:
+                        continue
+                    if len(cleaned) not in ROULETTE_NUMBER_ODDS:
+                        continue
+                    try:
+                        amount = parse_positive_int(item.get("amount"))
+                    except ValueError:
+                        continue
+                    selections.append(
+                        {
+                            "bet_type": "numbers",
+                            "chosen_number": None,
+                            "numbers": cleaned,
+                            "amount": amount,
+                            "label": item.get("label") or "-".join(str(number) for number in cleaned),
+                        }
+                    )
+                    continue
+                bet_type = item.get("bet_type")
+                if bet_type not in allowed:
+                    continue
+                chosen_number = None
+                if bet_type == "number":
+                    try:
+                        chosen_number = parse_positive_int(item.get("number"), minimum=0, maximum=36)
+                    except ValueError:
+                        continue
+                try:
+                    amount = parse_positive_int(item.get("amount"))
+                except ValueError:
+                    continue
+                numbers = [chosen_number] if bet_type == "number" and chosen_number is not None else None
+                selections.append(
+                    {
+                        "bet_type": bet_type,
+                        "chosen_number": chosen_number,
+                        "numbers": numbers,
+                        "amount": amount,
+                        "label": item.get("label"),
+                    }
+                )
+        if not selections:
+            try:
+                bet = parse_positive_int(request.form.get("bet"))
             except ValueError as exc:
                 flash(str(exc), "error")
                 return redirect(url_for("roulette"))
-        error = debit_or_error(g.user["id"], bet, "Roulette bet")
+            bet_type = request.form.get("bet_type")
+            if bet_type not in allowed:
+                flash("Choose a roulette bet.", "error")
+                return redirect(url_for("roulette"))
+            chosen_number = None
+            if bet_type == "number":
+                try:
+                    chosen_number = parse_positive_int(request.form.get("number"), minimum=0, maximum=36)
+                except ValueError as exc:
+                    flash(str(exc), "error")
+                    return redirect(url_for("roulette"))
+            selections.append({"bet_type": bet_type, "chosen_number": chosen_number, "numbers": [chosen_number] if bet_type == "number" and chosen_number is not None else None, "amount": bet})
+        total_bet = sum(item["amount"] for item in selections)
+        error = debit_or_error(g.user["id"], total_bet, "Roulette bet")
         if error:
             flash(error, "error")
             get_db().commit()
@@ -1529,67 +1732,41 @@ def roulette():
         ctx = begin_fair("roulette", request.form.get("client_seed"))
         number = ctx["rng"].randrange(37)
         color = roulette_color(number)
-        win = False
-        odds = 1
-        if bet_type == "red":
-            win = number in RED_ROULETTE
-        elif bet_type == "black":
-            win = number in BLACK_ROULETTE
-        elif bet_type == "odd":
-            win = number != 0 and number % 2 == 1
-        elif bet_type == "even":
-            win = number != 0 and number % 2 == 0
-        elif bet_type == "low":
-            win = 1 <= number <= 18
-        elif bet_type == "high":
-            win = 19 <= number <= 36
-        elif bet_type == "dozen1":
-            win = 1 <= number <= 12
-            odds = 2
-        elif bet_type == "dozen2":
-            win = 13 <= number <= 24
-            odds = 2
-        elif bet_type == "dozen3":
-            win = 25 <= number <= 36
-            odds = 2
-        elif bet_type == "column1":
-            win = number != 0 and number % 3 == 1
-            odds = 2
-        elif bet_type == "column2":
-            win = number != 0 and number % 3 == 2
-            odds = 2
-        elif bet_type == "column3":
-            win = number != 0 and number % 3 == 0
-            odds = 2
-        elif bet_type == "number":
-            win = number == chosen_number
-            odds = 35
-        payout = bet * (odds + 1) if win else 0
-        net = settle_wager(g.user["id"], bet, payout, "Roulette")
+        settled = []
+        payout = 0
+        for item in selections:
+            if item.get("numbers"):
+                win, odds = roulette_evaluate_numbers(item["numbers"], number)
+            else:
+                win, odds = roulette_evaluate_bet(item["bet_type"], item["chosen_number"], number)
+            item_payout = item["amount"] * (odds + 1) if win else 0
+            payout += item_payout
+            settled.append({**item, "label": roulette_selection_label(item), "odds": odds, "win": win, "payout": item_payout})
+        net = settle_wager(g.user["id"], total_bet, payout, "Roulette")
         fair = finish_fair(
             "roulette",
             ctx["pending"],
             ctx["client_seed"],
             {
-                "bet_type": bet_type,
-                "chosen_number": chosen_number,
+                "bets": settled,
                 "number": number,
                 "color": color,
-                "win": win,
+                "win": payout > total_bet,
                 "payout": payout,
-                "bet": bet,
+                "bet": total_bet,
                 "net": net,
                 "player_name": g.user["username"],
             },
         )
         get_db().commit()
         result = {
-            "bet": bet,
-            "bet_type": bet_type,
-            "chosen_number": chosen_number,
+            "bet": total_bet,
+            "bet_type": selections[0]["bet_type"],
+            "chosen_number": selections[0]["chosen_number"],
+            "bets": settled,
             "number": number,
             "color": color,
-            "win": win,
+            "win": payout > total_bet,
             "payout": payout,
             "net": net,
             "fair": fair,
@@ -1611,6 +1788,235 @@ def limbo_crash(server_seed, client_seed, nonce):
     roll = integer / max_integer
     multiplier = 0.99 / max(1.0 - roll, 0.000001)
     return min(100000.0, max(1.0, int(multiplier * 100) / 100.0))
+
+
+def crash_duration(multiplier):
+    return round(min(12.0, max(2.4, 1.6 + math.log(max(1.01, float(multiplier))) * 2.2)), 2)
+
+
+def crash_current_multiplier(current):
+    if not current:
+        return 1.0
+    elapsed = max(0.0, (datetime.utcnow() - utc_from_iso(current.get("started_at"))).total_seconds())
+    duration = max(1.0, float(current.get("duration") or 1))
+    progress = min(1.0, elapsed / duration)
+    crash = float(current.get("crash") or 1)
+    return round(1 + (crash - 1) * (progress**1.75), 4)
+
+
+def default_crash_state():
+    return {
+        "phase": "betting",
+        "round": 0,
+        "next_start_at": utc_in(CRASH_BETTING_SECONDS),
+        "result_until": None,
+        "current": None,
+        "bets": {},
+        "history": [],
+    }
+
+
+def crash_state():
+    return get_state("crash:main", default_crash_state)
+
+
+def save_crash_state(state):
+    state["history"] = state.get("history", [])[-60:]
+    set_state("crash:main", state)
+
+
+def advance_crash_state():
+    state = crash_state()
+    now = datetime.utcnow()
+    changed = False
+    if state.get("phase") == "crashed":
+        result_until = state.get("result_until")
+        if result_until and utc_from_iso(result_until) > now:
+            return state
+        state["phase"] = "betting"
+        state["next_start_at"] = utc_in(CRASH_BETTING_SECONDS)
+        state["result_until"] = None
+        state["current"] = None
+        state["bets"] = {}
+        changed = True
+    if state.get("phase") == "betting" and utc_from_iso(state.get("next_start_at")) <= now:
+        bets = state.get("bets", {})
+        seed = "|".join(
+            f"{uid}:{bet['username']}:{bet['bet']}:{bet.get('client_seed') or ''}"
+            for uid, bet in sorted(bets.items())
+        ) or f"table-{state.get('round', 0) + 1}"
+        ctx = begin_fair("crash", seed)
+        crash = limbo_crash(ctx["pending"]["server_seed"], ctx["client_seed"], ctx["pending"]["nonce"])
+        state["round"] = int(state.get("round", 0)) + 1
+        state["phase"] = "running"
+        state["current"] = {
+            "round": state["round"],
+            "crash": crash,
+            "duration": crash_duration(crash),
+            "started_at": utc_now(),
+            "pending": ctx["pending"],
+            "client_seed": ctx["client_seed"],
+        }
+        changed = True
+    if state.get("phase") == "running" and state.get("current"):
+        current = state["current"]
+        elapsed = (now - utc_from_iso(current.get("started_at"))).total_seconds()
+        if elapsed >= float(current.get("duration") or 1):
+            bets = state.get("bets", {})
+            settlements = []
+            for uid, bet in bets.items():
+                if bet.get("cashed"):
+                    net = int(bet.get("payout") or 0) - int(bet.get("bet") or 0)
+                    payout = int(bet.get("payout") or 0)
+                else:
+                    net = -int(bet.get("bet") or 0)
+                    payout = 0
+                settlements.append(
+                    {
+                        "user_id": uid,
+                        "username": bet["username"],
+                        "bet": int(bet["bet"]),
+                        "payout": payout,
+                        "net": net,
+                        "cashout": bet.get("cashout"),
+                    }
+                )
+            fair = finish_fair(
+                "crash",
+                current["pending"],
+                current["client_seed"],
+                {
+                    "player_name": ", ".join(item["username"] for item in settlements) if settlements else "Table",
+                    "round": current["round"],
+                    "crash": current["crash"],
+                    "bet": sum(item["bet"] for item in settlements),
+                    "payout": sum(item["payout"] for item in settlements),
+                    "net": sum(item["net"] for item in settlements),
+                    "settlements": settlements,
+                },
+            )
+            state.setdefault("history", []).append({"multiplier": current["crash"], "round": current["round"], "created_at": utc_now()})
+            state["last"] = {"crash": current["crash"], "round": current["round"], "fair": fair, "settlements": settlements}
+            state["phase"] = "crashed"
+            state["next_start_at"] = None
+            state["result_until"] = utc_in(CRASH_RESULT_HOLD_SECONDS)
+            state["current"] = {
+                "round": current["round"],
+                "crash": current["crash"],
+                "duration": current["duration"],
+                "started_at": current["started_at"],
+                "crashed_at": utc_now(),
+            }
+            state["bets"] = {}
+            changed = True
+    if changed:
+        save_crash_state(state)
+        get_db().commit()
+    return state
+
+
+def crash_public_state(user_id):
+    state = advance_crash_state()
+    now = datetime.utcnow()
+    countdown = max(0, int((utc_from_iso(state.get("next_start_at")) - now).total_seconds())) if state.get("phase") == "betting" else 0
+    active_bet = (state.get("bets") or {}).get(str(user_id))
+    current = state.get("current")
+    phase = state.get("phase")
+    return {
+        "phase": phase,
+        "round": state.get("round", 0),
+        "countdown": countdown,
+        "current": {
+            "round": current.get("round"),
+            "started_at": current.get("started_at"),
+            "duration": current.get("duration"),
+            "multiplier": float(current.get("crash") or 1) if phase == "crashed" else crash_current_multiplier(current),
+            "crash": current.get("crash"),
+            "crashed_at": current.get("crashed_at"),
+        } if current else None,
+        "result_until": state.get("result_until"),
+        "active_bet": active_bet,
+        "history": state.get("history", [])[-24:],
+        "last": state.get("last"),
+        "balance": get_balance(user_id),
+    }
+
+
+@app.route("/crash")
+@login_required
+def crash():
+    return render_template("crash.html")
+
+
+@app.route("/api/crash/state")
+@login_required
+def api_crash_state():
+    return jsonify(crash_public_state(g.user["id"]))
+
+
+@app.route("/api/crash/stream")
+@login_required
+def api_crash_stream():
+    user_id = g.user["id"]
+
+    @stream_with_context
+    def events():
+        while True:
+            payload = json.dumps(crash_public_state(user_id), separators=(",", ":"))
+            yield f"data: {payload}\n\n"
+            time.sleep(0.08)
+
+    return Response(events(), mimetype="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route("/api/crash/bet", methods=["POST"])
+@login_required
+def api_crash_bet():
+    state = advance_crash_state()
+    if state.get("phase") != "betting":
+        return jsonify({"error": "Round in progress. Betting opens after this crash."}), 400
+    if str(g.user["id"]) in state.get("bets", {}):
+        return jsonify({"error": "You already have a Crash bet locked."}), 400
+    try:
+        bet = parse_positive_int(request.form.get("bet"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    error = debit_or_error(g.user["id"], bet, "Crash bet")
+    if error:
+        get_db().commit()
+        return jsonify({"error": error}), 400
+    state.setdefault("bets", {})[str(g.user["id"])] = {
+        "username": g.user["username"],
+        "bet": bet,
+        "client_seed": (request.form.get("client_seed") or "").strip(),
+        "created_at": utc_now(),
+        "cashed": False,
+    }
+    save_crash_state(state)
+    get_db().commit()
+    return jsonify(crash_public_state(g.user["id"]))
+
+
+@app.route("/api/crash/cashout", methods=["POST"])
+@login_required
+def api_crash_cashout():
+    state = advance_crash_state()
+    if state.get("phase") != "running" or not state.get("current"):
+        return jsonify({"error": "Crash is not running."}), 400
+    bet = (state.get("bets") or {}).get(str(g.user["id"]))
+    if not bet:
+        return jsonify({"error": "You do not have an active Crash bet."}), 400
+    if bet.get("cashed"):
+        return jsonify({"error": "Already cashed out."}), 400
+    multiplier = crash_current_multiplier(state["current"])
+    if multiplier >= float(state["current"].get("crash") or 1):
+        return jsonify({"error": "Too late. It crashed."}), 400
+    payout = int(int(bet["bet"]) * multiplier)
+    change_balance(g.user["id"], payout, "Crash payout")
+    bet.update({"cashed": True, "cashout": multiplier, "payout": payout, "cashed_at": utc_now()})
+    save_crash_state(state)
+    get_db().commit()
+    return jsonify(crash_public_state(g.user["id"]))
 
 
 @app.route("/limbo", methods=["GET", "POST"])
@@ -2037,6 +2443,205 @@ def api_mines_cashout():
     return jsonify({"state": mines_public(state), "balance": get_balance(g.user["id"]), "outcome": "cashout"})
 
 
+def chicken_default_state():
+    return {"status": "idle", "last": None}
+
+
+def chicken_state(user_id):
+    return get_state(f"chicken:{user_id}", chicken_default_state)
+
+
+def save_chicken_state(user_id, state):
+    set_state(f"chicken:{user_id}", state)
+
+
+def chicken_multiplier(difficulty, step):
+    config = CHICKEN_DIFFICULTIES[difficulty]
+    if step <= 0:
+        return 1.0
+    value = (float(config["edge"]) / float(config["survival"])) ** int(step)
+    return round(max(1.01, value), 2)
+
+
+def chicken_generate_path(pending, client_seed, difficulty):
+    config = CHICKEN_DIFFICULTIES[difficulty]
+    outcomes = []
+    for index in range(int(config["steps"])):
+        rng = fair_rng(pending["server_seed"], client_seed, pending["nonce"], "chicken_cross", f"lane-{index}")
+        outcomes.append(rng.random() <= float(config["survival"]))
+    return outcomes
+
+
+def chicken_public(state, user_id):
+    difficulty = state.get("difficulty", "medium")
+    if difficulty not in CHICKEN_DIFFICULTIES:
+        difficulty = "medium"
+    config = CHICKEN_DIFFICULTIES[difficulty]
+    step = int(state.get("step") or 0)
+    bet = int(state.get("bet") or 0)
+    multiplier = chicken_multiplier(difficulty, step)
+    next_step = min(step + 1, int(config["steps"]))
+    next_multiplier = chicken_multiplier(difficulty, next_step)
+    pending = state.get("pending") or {}
+    pending_public = {
+        "id": pending.get("id"),
+        "game": pending.get("game", "chicken_cross"),
+        "server_seed_hash": pending.get("server_seed_hash"),
+        "server_seed": "",
+        "client_seed": state.get("client_seed", ""),
+        "nonce": pending.get("nonce"),
+        "result": None,
+    } if state.get("status") == "active" and pending else None
+    return {
+        "status": state.get("status", "idle"),
+        "bet": bet,
+        "difficulty": difficulty,
+        "difficulty_label": config["label"],
+        "step": step,
+        "max_steps": int(config["steps"]),
+        "multiplier": multiplier,
+        "next_multiplier": next_multiplier,
+        "potential_payout": int(bet * multiplier),
+        "next_payout": int(bet * next_multiplier),
+        "last_event": state.get("last_event"),
+        "last": state.get("last"),
+        "pending": pending_public,
+        "balance": get_balance(user_id),
+    }
+
+
+def finish_chicken_round(state, result, payout=0):
+    bet = int(state.get("bet") or 0)
+    difficulty = state.get("difficulty", "medium")
+    step = int(state.get("step") or 0)
+    multiplier = round((payout / bet), 4) if bet else 0
+    fair = finish_fair(
+        "chicken_cross",
+        state["pending"],
+        state["client_seed"],
+        {
+            "player_name": g.user["username"],
+            "result": result,
+            "difficulty": difficulty,
+            "step": step,
+            "max_steps": CHICKEN_DIFFICULTIES[difficulty]["steps"],
+            "bet": bet,
+            "payout": payout,
+            "net": payout - bet,
+            "multiplier": multiplier,
+        },
+    )
+    state["status"] = "crashed" if result == "crash" else "cashed"
+    state["last"] = {
+        "result": result,
+        "difficulty": difficulty,
+        "step": step,
+        "bet": bet,
+        "payout": payout,
+        "net": payout - bet,
+        "multiplier": multiplier,
+        "fair": fair,
+    }
+    state.pop("pending", None)
+    state.pop("client_seed", None)
+    state.pop("outcomes", None)
+    return state
+
+
+@app.route("/chicken-cross")
+@login_required
+def chicken_cross():
+    return render_template("chicken_cross.html", difficulties=CHICKEN_DIFFICULTIES)
+
+
+@app.route("/api/chicken/state")
+@login_required
+def api_chicken_state():
+    return jsonify(chicken_public(chicken_state(g.user["id"]), g.user["id"]))
+
+
+@app.route("/api/chicken/start", methods=["POST"])
+@login_required
+def api_chicken_start():
+    state = chicken_state(g.user["id"])
+    if state.get("status") == "active":
+        return jsonify({"error": "Cash out or finish the current crossing first."}), 400
+    try:
+        bet = parse_positive_int(request.form.get("bet"), minimum=1, maximum=500_000)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    difficulty = (request.form.get("difficulty") or "medium").strip().lower()
+    if difficulty not in CHICKEN_DIFFICULTIES:
+        return jsonify({"error": "Choose a valid difficulty."}), 400
+    error = debit_or_error(g.user["id"], bet, "Chicken Cross bet")
+    if error:
+        get_db().commit()
+        return jsonify({"error": error}), 400
+    ctx = begin_fair("chicken_cross", request.form.get("client_seed"))
+    state = {
+        "status": "active",
+        "bet": bet,
+        "difficulty": difficulty,
+        "step": 0,
+        "pending": ctx["pending"],
+        "client_seed": ctx["client_seed"],
+        "outcomes": chicken_generate_path(ctx["pending"], ctx["client_seed"], difficulty),
+        "last": None,
+        "last_event": {"type": "start", "step": 0},
+    }
+    save_chicken_state(g.user["id"], state)
+    get_db().commit()
+    return jsonify(chicken_public(state, g.user["id"]))
+
+
+@app.route("/api/chicken/step", methods=["POST"])
+@login_required
+def api_chicken_step():
+    state = chicken_state(g.user["id"])
+    if state.get("status") != "active":
+        return jsonify({"error": "Start a Chicken Cross round first."}), 400
+    difficulty = state.get("difficulty", "medium")
+    step_index = int(state.get("step") or 0)
+    max_steps = int(CHICKEN_DIFFICULTIES[difficulty]["steps"])
+    if step_index >= max_steps:
+        return jsonify({"error": "The chicken is already across. Cash out."}), 400
+    survived = bool((state.get("outcomes") or [False])[step_index])
+    if not survived:
+        state["last_event"] = {"type": "crash", "from": step_index, "to": step_index + 1}
+        state = finish_chicken_round(state, "crash", 0)
+        save_chicken_state(g.user["id"], state)
+        get_db().commit()
+        return jsonify(chicken_public(state, g.user["id"]))
+    state["step"] = step_index + 1
+    if state["step"] >= max_steps:
+        payout = int(int(state["bet"]) * chicken_multiplier(difficulty, state["step"]))
+        change_balance(g.user["id"], payout, "Chicken Cross payout")
+        state["last_event"] = {"type": "complete", "from": step_index, "to": state["step"]}
+        state = finish_chicken_round(state, "complete", payout)
+    else:
+        state["last_event"] = {"type": "safe", "from": step_index, "to": state["step"]}
+    save_chicken_state(g.user["id"], state)
+    get_db().commit()
+    return jsonify(chicken_public(state, g.user["id"]))
+
+
+@app.route("/api/chicken/cashout", methods=["POST"])
+@login_required
+def api_chicken_cashout():
+    state = chicken_state(g.user["id"])
+    if state.get("status") != "active":
+        return jsonify({"error": "No active Chicken Cross round."}), 400
+    if int(state.get("step") or 0) <= 0:
+        return jsonify({"error": "Move at least one lane before cashing out."}), 400
+    payout = int(int(state["bet"]) * chicken_multiplier(state["difficulty"], state["step"]))
+    change_balance(g.user["id"], payout, "Chicken Cross payout")
+    state["last_event"] = {"type": "cashout", "step": state["step"]}
+    state = finish_chicken_round(state, "cashout", payout)
+    save_chicken_state(g.user["id"], state)
+    get_db().commit()
+    return jsonify(chicken_public(state, g.user["id"]))
+
+
 def slot_weighted_symbol(rng):
     total = sum(symbol["weight"] for symbol in SLOT_SYMBOLS)
     pick = rng.uniform(0, total)
@@ -2318,7 +2923,7 @@ def hilo():
                 if payout > 0:
                     change_balance(g.user["id"], payout, "Hi-Lo payout")
                 hilo_finish_round(state, "cashout", payout, {"reason": "card queue complete"})
-                flash("Full card queue complete. Cashout paid.", "success")
+                flash("Full card queue complete. Cash out paid.", "success")
             else:
                 previous = state["current"]
                 next_card = queue.pop(0)
@@ -2752,7 +3357,7 @@ def api_blackjack_bet():
         return jsonify({"error": str(exc)}), 400
     total_bet = bet + pair_bet + plus3_bet
     if get_balance(g.user["id"]) < total_bet:
-        return jsonify({"error": "Not enough fake chips for that bet."}), 400
+        return jsonify({"error": "Insufficient balance for this bet."}), 400
     player.update(
         {
             "bet": bet,
@@ -2876,7 +3481,7 @@ def api_blackjack_action():
         if len(cards) != 2:
             return jsonify({"error": "Double is only available on the first two cards of a hand."}), 400
         if get_balance(g.user["id"]) < hand_bet:
-            return jsonify({"error": "Not enough fake chips to double."}), 400
+            return jsonify({"error": "Insufficient balance to double."}), 400
         change_balance(g.user["id"], -hand_bet, "Blackjack bet")
         if player.get("split_hands"):
             current["bet"] = hand_bet * 2
@@ -2899,7 +3504,7 @@ def api_blackjack_action():
         if not blackjack_can_split(player):
             return jsonify({"error": "Split is only available when your first two cards have the same rank."}), 400
         if get_balance(g.user["id"]) < int(player["bet"]):
-            return jsonify({"error": "Not enough fake chips to split."}), 400
+            return jsonify({"error": "Insufficient balance to split."}), 400
         change_balance(g.user["id"], -int(player["bet"]), "Blackjack bet")
         first, second = player["hand"]
         player["split_hands"] = [
@@ -3168,7 +3773,7 @@ def api_holdem_seed():
     if state["phase"] in {"resolved", "showdown"}:
         reset_holdem_after_result(state)
     if state["phase"] != "waiting":
-        return jsonify({"error": "Client seeds can only be set before the hand."}), 400
+        return jsonify({"error": "Client Seed can only be set before the hand."}), 400
     player = state["players"].get(str(g.user["id"]))
     if not player:
         return jsonify({"error": "Join the poker table first."}), 400
@@ -3254,7 +3859,7 @@ def api_holdem_action():
         if action == "check" and to_call > 0:
             return jsonify({"error": "You must call, raise, or fold."}), 400
         if get_balance(g.user["id"]) < to_call:
-            return jsonify({"error": "Not enough chips to call."}), 400
+            return jsonify({"error": "Insufficient balance to call."}), 400
         if to_call:
             change_balance(g.user["id"], -to_call, "Texas Hold'em call")
             player["bet_current"] += to_call
@@ -3272,7 +3877,7 @@ def api_holdem_action():
             return jsonify({"error": str(exc)}), 400
         total = to_call + raise_amount
         if get_balance(g.user["id"]) < total:
-            return jsonify({"error": "Not enough chips to raise."}), 400
+            return jsonify({"error": "Insufficient balance to raise."}), 400
         change_balance(g.user["id"], -total, "Texas Hold'em raise")
         player["bet_current"] += total
         player["total_bet"] += total
@@ -3301,4 +3906,4 @@ with app.app_context():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, use_reloader=False, host="127.0.0.1", port=int(os.environ.get("PORT", "3333")))
+    app.run(debug=True, use_reloader=False, threaded=True, host="127.0.0.1", port=int(os.environ.get("PORT", "3333")))

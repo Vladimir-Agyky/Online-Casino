@@ -7,6 +7,14 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
+    <script>
+        try {
+            const needsWideTable = location.pathname.startsWith("/baccarat") || location.pathname.startsWith("/dragon-tiger");
+            if (needsWideTable || localStorage.getItem("novaChatCollapsed") === "true") {
+                document.body.classList.add("chat-collapsed");
+            }
+        } catch (_error) {}
+    </script>
     <div class="felt-glow"></div>
     <header class="topbar">
         <a class="brand" href="{{ url_for('lobby') if current_user else url_for('login') }}">
@@ -16,8 +24,8 @@
         <nav class="nav-links">
             {% if current_user %}
                 <a href="{{ url_for('lobby') }}">Lobby</a>
-                <a href="{{ url_for('fairness') }}">Fair Play</a>
-                <a href="{{ url_for('raindrops') }}">Raindrop</a>
+                <a href="{{ url_for('fairness') }}">Fairness</a>
+                <a href="{{ url_for('raindrops') }}">Rain</a>
                 {% if current_user.role == 'admin' %}
                     <a href="{{ url_for('admin') }}">Admin</a>
                 {% endif %}
@@ -92,25 +100,40 @@
     {% endif %}
 
     {% if current_user %}
+        <div class="fairness-modal" data-fairness-modal hidden>
+            <button class="fairness-backdrop" type="button" data-fairness-close aria-label="Close fairness"></button>
+            <section class="fairness-dialog" role="dialog" aria-modal="true" aria-labelledby="fairness-title">
+                <header class="fairness-head">
+                    <div>
+                        <div class="section-kicker">Provably Fair</div>
+                        <h2 id="fairness-title">Fairness</h2>
+                    </div>
+                    <button class="button ghost small" type="button" data-fairness-close aria-label="Close fairness">X</button>
+                </header>
+                <div class="fairness-body" data-fairness-body></div>
+            </section>
+        </div>
+
         <aside class="chat-window" data-chat-window>
             <div class="chat-head">
                 <div>
                     <div class="section-kicker">Global</div>
                     <strong>Chat</strong>
                 </div>
-                <button class="button ghost small" type="button" data-chat-toggle>Hide</button>
+                <button class="button ghost small" type="button" data-chat-toggle aria-expanded="true">Hide Chat</button>
             </div>
             <div class="chat-messages" data-chat-messages></div>
             <form class="rain-form" data-rain-form>
-                <input name="amount" type="number" min="1" placeholder="Rain amount">
+                <input name="amount" type="number" min="1" placeholder="Rain Amount">
                 <input name="count" type="number" min="1" max="25" value="3" aria-label="Receivers">
                 <button class="button secondary small" type="submit">Rain</button>
             </form>
             <form class="chat-form" data-chat-form>
-                <input name="message" autocomplete="off" maxlength="240" placeholder="Message">
+                <input name="message" autocomplete="off" maxlength="240" placeholder="Type a message">
                 <button class="button primary small" type="submit">Send</button>
             </form>
         </aside>
+        <button class="chat-reopen-tab" type="button" data-chat-toggle aria-expanded="false" aria-label="Open chat">◀ Chat</button>
     {% endif %}
 
     <div class="toast-stack" data-toast-stack></div>

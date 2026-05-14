@@ -9,7 +9,7 @@
         <div class="table-header">
             <div>
                 <div class="section-kicker">Limbo</div>
-                <h1>Chase the multiplier</h1>
+                <h1>Chase the Multiplier</h1>
             </div>
             <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
         </div>
@@ -41,7 +41,7 @@
                 <input type="number" name="target" min="1.01" max="1000" step="0.01" value="{{ result.target if result else '2.00' }}" required>
             </label>
             <label>
-                Client seed
+                Client Seed
                 <input name="client_seed" value="{{ current_user.username }}-limbo">
             </label>
             <button class="button primary" type="submit">Launch</button>

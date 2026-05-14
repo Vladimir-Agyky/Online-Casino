@@ -1,18 +1,18 @@
 {% extends "base.html" %}
 
-{% block title %}Raindrop - Nova Felt Casino{% endblock %}
+{% block title %}Rain - Nova Felt Casino{% endblock %}
 
 {% block content %}
 <section class="panel page-heading">
     <div class="section-kicker">Community Event</div>
-    <h1>Raindrop</h1>
-    <p class="muted-line">Create an hourly fake-chip drop. Other players must join before the timer ends to receive a share.</p>
+    <h1>Rain</h1>
+    <p class="muted-line">Create a timed chip drop. Players who join before it ends share the prize.</p>
 </section>
 
 <section class="panel-row">
     <div class="panel">
         <div class="panel-heading">
-            <h2>Active and recent drops</h2>
+            <h2>Active Rain</h2>
         </div>
         <div class="raindrop-list">
             {% for event in events %}
@@ -33,7 +33,7 @@
                         {% for item in event.joined %}
                             <i>{{ item.username[0]|upper }}</i>
                         {% else %}
-                            <em>No joins</em>
+                            <em>No entries</em>
                         {% endfor %}
                     </div>
                     {% if event.status == 'open' and event.creator_id != current_user.id %}
@@ -41,12 +41,12 @@
                     {% endif %}
                 </div>
             {% else %}
-                <div class="empty-row">No raindrops yet.</div>
+                <div class="empty-row">No rain events yet.</div>
             {% endfor %}
         </div>
     </div>
     <aside class="panel account-panel">
-        <h2>Create</h2>
+        <h2>Create Rain</h2>
         <form method="post" class="stacked-form">
             <label>
                 Amount
@@ -55,9 +55,9 @@
             <label>
                 Time
                 <input type="number" name="hours" min="1" max="168" value="1" required>
-                <span class="range-value"><strong>Hourly units</strong></span>
+                <span class="range-value"><strong>Hours</strong></span>
             </label>
-            <button class="button primary" type="submit">Schedule Raindrop</button>
+            <button class="button primary" type="submit">Schedule Rain</button>
         </form>
     </aside>
 </section>

@@ -9,7 +9,7 @@
         <div class="table-header">
             <div>
                 <div class="section-kicker">Plinko</div>
-                <h1>Risk and rows</h1>
+                <h1>Drop for Multipliers</h1>
             </div>
             <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
         </div>
@@ -58,7 +58,7 @@
                 <input type="number" name="bet" min="1" value="{{ result.bet if result else 100 }}" required>
             </label>
             <label>
-                Client seed
+                Client Seed
                 <input name="client_seed" value="{{ current_user.username }}-plinko">
             </label>
             <label>
@@ -71,7 +71,7 @@
                 <label><input type="radio" name="risk" value="medium" {% if risk == 'medium' %}checked{% endif %}><span>Medium</span></label>
                 <label><input type="radio" name="risk" value="high" {% if risk == 'high' %}checked{% endif %}><span>High</span></label>
             </div>
-            <button class="button primary" type="submit">Drop ball</button>
+            <button class="button primary" type="submit">Drop Ball</button>
         </form>
         <div class="auto-panel">
             <div class="section-kicker">Auto</div>

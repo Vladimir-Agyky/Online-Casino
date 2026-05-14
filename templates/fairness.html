@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 
-{% block title %}Fair Play - Nova Felt Casino{% endblock %}
+{% block title %}Fairness - Nova Felt Casino{% endblock %}
 
 {% block content %}
 <section class="page-heading">
     <div>
-        <div class="section-kicker">Provably fair log</div>
-        <h1>Seed records</h1>
+        <div class="section-kicker">Provably Fair</div>
+        <h1>Fairness Records</h1>
     </div>
 </section>
 
@@ -17,12 +17,12 @@
             <code>sha256(server_seed)</code>
         </div>
         <div>
-            <span>Random input</span>
+            <span>Random Inputs</span>
             <code>server_seed : client_seed : nonce : game</code>
         </div>
         <div>
             <span>Reveal</span>
-            <code>server_seed after round</code>
+            <code>server_seed after the round</code>
         </div>
     </div>
 </section>
@@ -37,9 +37,9 @@
             </div>
             <div class="fair-grid">
                 <div><span>Round</span><code>{{ round.id }}</code></div>
-                <div><span>Server hash</span><code>{{ round.server_seed_hash }}</code></div>
-                <div><span>Server seed</span><code>{{ round.server_seed }}</code></div>
-                <div><span>Client seed</span><code>{{ round.client_seed }}</code></div>
+                <div><span>Server Seed Hash</span><code>{{ round.server_seed_hash }}</code></div>
+                <div><span>Server Seed</span><code>{{ round.server_seed }}</code></div>
+                <div><span>Client Seed</span><code>{{ round.client_seed }}</code></div>
                 <div><span>Nonce</span><code>{{ round.nonce }}</code></div>
             </div>
             <pre>{{ result|tojson(indent=2) }}</pre>

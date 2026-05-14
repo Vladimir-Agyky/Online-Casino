@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block title %}Chicken Cross - Nova Felt Casino{% endblock %}
+
+{% block content %}
+<section class="game-page chicken-stage" data-game="chicken">
+    <div class="game-board chicken-board">
+        <div class="table-header">
+            <div>
+                <div class="section-kicker">Chicken Cross</div>
+                <h1>Cross the Road</h1>
+            </div>
+            <a class="button ghost small" href="{{ url_for('lobby') }}">Lobby</a>
+        </div>
+
+        <div class="chicken-scene" data-chicken-scene style="--chicken-step: 0; --lane-count: 10">
+            <div class="chicken-safe-zone start">Start</div>
+            <div class="chicken-lanes" data-chicken-lanes></div>
+            <div class="chicken-safe-zone finish">Finish</div>
+            <div class="chicken-character" data-chicken-character aria-hidden="true">
+                <span class="chicken-shadow"></span>
+                <span class="chicken-leg left"></span>
+                <span class="chicken-leg right"></span>
+                <span class="chicken-body"></span>
+                <span class="chicken-wing"></span>
+                <span class="chicken-head"></span>
+                <span class="chicken-beak"></span>
+                <span class="chicken-eye"></span>
+            </div>
+        </div>
+
+        <div class="chicken-hud">
+            <div><span>Current</span><strong data-chicken-current>1.00x</strong></div>
+            <div><span>Next</span><strong data-chicken-next>1.00x</strong></div>
+            <div><span>Payout</span><strong data-chicken-payout>0</strong></div>
+            <div><span>Lane</span><strong data-chicken-lane>0 / 10</strong></div>
+        </div>
+
+        <div data-chicken-result></div>
+        <div data-chicken-fair></div>
+    </div>
+
+    <aside class="bet-panel chicken-panel">
+        <form class="stacked-form" data-chicken-form data-chip-mode="select">
+            <label>
+                Bet Amount
+                <input type="number" name="bet" min="1" value="100" required>
+            </label>
+            <label>
+                Difficulty
+                <select name="difficulty" data-chicken-difficulty>
+                    {% for key, item in difficulties.items() %}
+                        <option value="{{ key }}" {{ 'selected' if key == 'medium' else '' }}>{{ item.label }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>
+                Client Seed
+                <input name="client_seed" value="{{ current_user.username }}-chicken">
+            </label>
+            <button class="button primary" type="submit" data-chicken-start>Start Round</button>
+        </form>
+        <div class="chicken-actions">
+            <button class="button primary" type="button" data-chicken-step disabled>Step</button>
+            <button class="button secondary" type="button" data-chicken-cashout disabled>Cash Out</button>
+        </div>
+        <div class="muted-line" data-chicken-state>Set your bet and choose a difficulty.</div>
+    </aside>
+</section>
+{% endblock %}
